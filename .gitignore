@@ -1,0 +1,60 @@
+# -------------------------
+# Python / venv
+# -------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.egg-info/
+.eggs/
+.venv/
+env/
+venv/
+
+
+# -------------------------
+# macOS system files
+# -------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# -------------------------
+# Logs & local state
+# -------------------------
+*.log
+drive_fetch.log
+*.sqlite
+*.db
+
+# Google OAuth tokens
+token.json
+credentials.json
+
+# -------------------------
+# PyInstaller / build artifacts
+# -------------------------
+build/
+*.spec
+
+# -------------------------
+# IDE/editor files
+# -------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+
+# Ignore build/dist outputs
+/dist/*
+/build/*
+
+
+# Ignore dist outputs except zipped app
+dist/*
+!dist/*.zip
