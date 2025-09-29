@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # drive_fetch_gui.py — Simple Tkinter GUI (bilingual EN/ID)
-# v0.13 — 2025-09-29 (language switcher + i18n, sizes up to 6000)
+# v0.14 — 2025-09-30
+# - Keeps original thumbnail/video downloader at top
+# - Adds separate section to convert local thumbnail folders to ORIGINAL images
+#   (select a folder of your chosen thumbnails and it will add full-size images into the same folder)
 
 import os
 import threading, queue, traceback, sys, re
@@ -31,6 +34,7 @@ DEFAULT_URLS = [
     "https://drive.google.com/drive/folders/1aOgrp6huu_5b-egMRgTtefpiCXYGhDxS",
     "https://drive.google.com/drive/folders/1nozDgru1P9-NQRxTBOVp0m-_ujZHtt6H",
 ]
+CONVERT_THUMBS_DIR = None  # path to a local folder of thumbnails for conversion
 
 # ----------------- i18n -----------------
 
@@ -71,6 +75,20 @@ I18N = {
         "language": "Language / Bahasa",
         "lang_en": "English",
         "lang_id": "Bahasa Indonesia",
+
+        # Converter section
+        "conv_title": "🔁 Convert Thumbnails to Original Images",
+        "conv_subtitle": (
+            "Once you finish your downloads, pick the images you want in full size and put them into a folder on your computer. "
+            "Then run this. It will add the full-size images to that same folder."
+        ),
+        "conv_pick_label": "Folder containing chosen thumbnails:",
+        "conv_btn_choose": "Choose Folder…",
+        "conv_btn_start": "Start",
+        "missing_conv_dir_title": "Missing folder",
+        "missing_conv_dir_msg": "Please choose the folder that contains your selected thumbnails.",
+        "log_conv_using": "[GUI] Converting thumbnails in: {path}",
+        "log_conv_start": "[GUI] Starting original-size fetch for files in this folder…",
     },
     "id": {
         "app_title": "Drive Fetch",
@@ -108,14 +126,26 @@ I18N = {
         "language": "Bahasa / Language",
         "lang_en": "English",
         "lang_id": "Bahasa Indonesia",
+
+        # Converter section
+        "conv_title": "🔁 Ubah Thumbnail ke Gambar Asli",
+        "conv_subtitle": (
+            "Setelah selesai mengunduh, pilih gambar yang Anda inginkan ukuran aslinya dan masukkan ke sebuah folder di komputer. "
+            "Lalu jalankan bagian ini. Aplikasi akan menambahkan gambar ukuran penuh ke folder yang sama."
+        ),
+        "conv_pick_label": "Folder berisi thumbnail pilihan:",
+        "conv_btn_choose": "Pilih Folder…",
+        "conv_btn_start": "Mulai Ambil Ukuran Asli",
+        "missing_conv_dir_title": "Folder belum dipilih",
+        "missing_conv_dir_msg": "Silakan pilih folder yang berisi thumbnail pilihan Anda.",
+        "log_conv_using": "[GUI] Mengonversi thumbnail di: {path}",
+        "log_conv_start": "[GUI] Memulai unduhan gambar ukuran asli untuk file di folder ini…",
     },
 }
-
 
 def T(lang: str, key: str, **kw) -> str:
     txt = I18N.get(lang, I18N["en"]).get(key, I18N["en"].get(key, key))
     return txt.format(**kw) if kw else txt
-
 
 # ----------------- Helpers -----------------
 
@@ -135,7 +165,6 @@ def locate_credentials():
         except Exception:
             continue
     return None
-
 
 # ----------------- Logging bridge -----------------
 
@@ -160,8 +189,7 @@ class TkLogHandler:
             pass
         self.widget.after(100, self._drain)
 
-
-# ----------------- Worker -----------------
+# ----------------- Workers -----------------
 
 def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                preview_width: int, download_videos: bool, img_original: bool, app_ref, lang: str):
@@ -189,19 +217,22 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
         dfr.IMAGE_WIDTH = int(preview_width)
         dfr.DOWNLOAD_VIDEOS = bool(download_videos)
         setattr(dfr, "DOWNLOAD_IMAGES_ORIGINAL", bool(img_original))
+        setattr(dfr, "CONVERT_THUMBS_DIR", "")  # make sure converter mode is off
 
-        # Stream backend logs into GUI
+        # Stream backend logs into GUI (and update progress when keywords appear)
         class _GuiHandler(dfr.logging.Handler):
             def emit(self, record):
                 try:
                     msg = self.format(record)
                     log.put(msg)
                     if "[Progress]" in msg:
-                        mi = re.search(r"(\d+)/(\d+)", msg)
+                        # Update images/videos progress if we can parse counts
+                        mi = re.findall(r"(\d+)/(\d+)", msg)
                         if mi:
-                            # We don't know which it is; update both if present
-                            app_ref.update_progress_images(int(mi.group(1)), int(mi.group(2)))
-                            app_ref.update_progress_videos(int(mi.group(1)), int(mi.group(2)))
+                            # Try first pair for images, second for videos if present
+                            app_ref.update_progress_images(int(mi[0][0]), int(mi[0][1]))
+                            if len(mi) > 1:
+                                app_ref.update_progress_videos(int(mi[1][0]), int(mi[1][1]))
                 except Exception:
                     pass
 
@@ -220,6 +251,60 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
     finally:
         btn.configure(state="normal")
 
+def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref, lang: str):
+    """
+    Conversion mode: scan a local folder for *_w###.jpg thumbnails and fetch originals into the same folder.
+    """
+    btn.configure(state="disabled")
+    try:
+        if not local_folder or not os.path.isdir(local_folder):
+            messagebox.showerror(T(lang, "missing_conv_dir_title"), T(lang, "missing_conv_dir_msg"))
+            return
+
+        log.put(T(lang, "log_conv_using", path=local_folder))
+        log.put(T(lang, "log_conv_start"))
+
+        cred_path = locate_credentials()
+        if cred_path:
+            dfr.CREDENTIALS_FILE = str(cred_path)
+            log.put(T(lang, "log_creds_found", path=cred_path))
+        else:
+            log.put(T(lang, "log_creds_missing"))
+
+        # Configure backend for conversion mode
+        setattr(dfr, "CONVERT_THUMBS_DIR", str(local_folder))
+        setattr(dfr, "DOWNLOAD_IMAGES_ORIGINAL", True)
+        setattr(dfr, "DOWNLOAD_VIDEOS", False)  # not needed here
+
+        # Stream logs to GUI
+        class _GuiHandler(dfr.logging.Handler):
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    log.put(msg)
+                    if "[Progress]" in msg:
+                        mi = re.findall(r"(\d+)/(\d+)", msg)
+                        if mi:
+                            app_ref.update_progress_images(int(mi[0][0]), int(mi[0][1]))
+                except Exception:
+                    pass
+
+        root_logger = dfr.logging.getLogger()
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
+        dfr.setup_logging()
+        fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
+        gh = _GuiHandler(); gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO)); gh.setFormatter(fmt)
+        dfr.logging.getLogger().addHandler(gh)
+
+        dfr.main()
+        log.put("\n" + T(lang, "done"))
+    except Exception:
+        log.put("\n" + T(lang, "fatal") + "\n" + traceback.format_exc())
+    finally:
+        # Reset converter flag so future thumbnail runs aren't intercepted
+        setattr(dfr, "CONVERT_THUMBS_DIR", "")
+        btn.configure(state="normal")
 
 # ----------------- App -----------------
 
@@ -240,7 +325,7 @@ class App(tk.Tk):
         super().__init__()
         self.lang = "en"  # default language
         self.title(T(self.lang, "app_title"))
-        self.geometry("980x860"); self.minsize(820, 660)
+        self.geometry("980x950"); self.minsize(820, 760)
 
         # Language switcher
         topbar = ttk.Frame(self); topbar.pack(fill="x", padx=12, pady=(10, 0))
@@ -253,13 +338,14 @@ class App(tk.Tk):
         self.lang_box.pack(side="left", padx=(8, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self._on_lang_change)
 
-        # Intro / instructions
+        # Intro / instructions (Downloader section)
         self.hdr = ttk.Label(self, wraplength=940, justify="left")
         self.hdr.pack(anchor="w", padx=12, pady=(12, 6))
 
+        # --- DOWNLOADER (top) ---
         self.urls_label = ttk.Label(self)
         self.urls_label.pack(anchor="w", padx=12)
-        self.urlbox = scrolledtext.ScrolledText(self, height=7)
+        self.urlbox = scrolledtext.ScrolledText(self, height=6)
         self.urlbox.insert("1.0", "\n".join(DEFAULT_URLS) + "\n")
         self.urlbox.pack(fill="x", padx=12)
 
@@ -284,12 +370,35 @@ class App(tk.Tk):
         self.videos_check = ttk.Checkbutton(vrow, variable=self.videos_var)
         self.videos_check.pack(side="left")
 
-        btnrow = ttk.Frame(self); btnrow.pack(fill="x", padx=12, pady=(0,8))
+        btnrow = ttk.Frame(self); btnrow.pack(fill="x", padx=12, pady=(2,10))
         self.start_btn = ttk.Button(btnrow, command=self.start); self.start_btn.pack(side="right")
 
+        # --- CONVERTER (below) ---
+        sep = ttk.Separator(self, orient="horizontal"); sep.pack(fill="x", padx=12, pady=(6, 8))
+
+        conv_box = ttk.Frame(self); conv_box.pack(fill="x", padx=12, pady=(4, 6))
+        self.conv_title = ttk.Label(conv_box, font=("TkDefaultFont", 11, "bold"))
+        self.conv_title.pack(anchor="w")
+        self.conv_subtitle = ttk.Label(conv_box, wraplength=940, justify="left")
+        self.conv_subtitle.pack(anchor="w", pady=(4, 8))
+
+        conv_row = ttk.Frame(self); conv_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.conv_pick_label = ttk.Label(conv_row)
+        self.conv_pick_label.pack(side="left")
+        self.conv_dir_var = tk.StringVar()
+        self.conv_dir_entry = ttk.Entry(conv_row, textvariable=self.conv_dir_var)
+        self.conv_dir_entry.pack(side="left", fill="x", expand=True, padx=8)
+        self.conv_choose_btn = ttk.Button(conv_row, command=self.pick_conv_dir)
+        self.conv_choose_btn.pack(side="left")
+
+        conv_btn_row = ttk.Frame(self); conv_btn_row.pack(fill="x", padx=12, pady=(4, 8))
+        self.conv_start_btn = ttk.Button(conv_btn_row, command=self.start_converter)
+        self.conv_start_btn.pack(side="right")
+
+        # --- Logs & progress (shared) ---
         self.log_title = ttk.Label(self)
         self.log_title.pack(anchor="w", padx=12)
-        self.logs = scrolledtext.ScrolledText(self, height=18, state="disabled"); self.logs.pack(fill="both", expand=True, padx=12, pady=(0,10))
+        self.logs = scrolledtext.ScrolledText(self, height=16, state="disabled"); self.logs.pack(fill="both", expand=True, padx=12, pady=(0,10))
         self.log_handler = TkLogHandler(self.logs)
 
         prow = ttk.Frame(self); prow.pack(fill="x", padx=12, pady=(0,12))
@@ -330,6 +439,12 @@ class App(tk.Tk):
         self.log_title.configure(text=T(self.lang, "log"))
         self.images_label.configure(text=T(self.lang, "images"))
         self.videos_label.configure(text=T(self.lang, "videos"))
+        # Converter labels
+        self.conv_title.configure(text=T(self.lang, "conv_title"))
+        self.conv_subtitle.configure(text=T(self.lang, "conv_subtitle"))
+        self.conv_pick_label.configure(text=T(self.lang, "conv_pick_label"))
+        self.conv_choose_btn.configure(text=T(self.lang, "conv_btn_choose"))
+        self.conv_start_btn.configure(text=T(self.lang, "conv_btn_start"))
         # Update language selector label text
         self.lang_box.configure(values=[T("en", "lang_en"), T("id", "lang_id")])
         self.lang_var.set(T(self.lang, "lang_en") if self.lang == "en" else T(self.lang, "lang_id"))
@@ -349,6 +464,10 @@ class App(tk.Tk):
     def pick_out(self):
         d = filedialog.askdirectory()
         if d: self.outvar.set(d)
+
+    def pick_conv_dir(self):
+        d = filedialog.askdirectory()
+        if d: self.conv_dir_var.set(d)
 
     def start(self):
         urls = [u.strip() for u in self.urlbox.get("1.0","end").splitlines() if u.strip()]
@@ -370,6 +489,18 @@ class App(tk.Tk):
         )
         t.start()
 
+    def start_converter(self):
+        local_dir = self.conv_dir_var.get().strip()
+        if not local_dir:
+            messagebox.showerror(T(self.lang, "missing_conv_dir_title"), T(self.lang, "missing_conv_dir_msg")); return
+        self.update_progress_images(0,0)  # Converter mainly affects images
+        t = threading.Thread(
+            target=run_converter,
+            args=(local_dir, self.log_handler, self.conv_start_btn, self, self.lang),
+            daemon=True
+        )
+        t.start()
+
     def update_progress_images(self, done, total):
         total = max(total, 0)
         done = min(max(done,0), total) if total else 0
@@ -385,7 +516,6 @@ class App(tk.Tk):
         self.progress_videos["value"] = done
         self.progress_videos_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
         self.update_idletasks()
-
 
 if __name__ == "__main__":
     App().mainloop()

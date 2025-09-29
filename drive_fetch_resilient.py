@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# drive_fetch_resilient.py v1.7 — 2025-09-29
+# drive_fetch_resilient.py v1.8 — 2025-09-30
+# - Adds "thumbnail-folder → originals" mode via CONVERT_THUMBS_DIR
+# - Keeps bilingual logs (EN/ID)
+# - Works with GUI by toggling globals before calling main()
 
-import os, re, io, sys, time, signal, random, requests
+import os, re, io, sys, time, signal, requests, logging, platform
 from urllib.parse import urlparse, parse_qs
 from typing import Iterator, Dict, Optional, List
 from dataclasses import dataclass, field
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.errors import HttpError
-import logging
-from logging.handlers import RotatingFileHandler
-
-import platform
-from pathlib import Path
 
 APP_NAME = "OntahoodDownloader"
 
@@ -31,37 +32,17 @@ def _default_support_dir() -> Path:
 SUPPORT_DIR = _default_support_dir()
 SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Allow env overrides
+# -------------------- Runtime options --------------------
 CREDENTIALS_FILE = os.environ.get("CREDENTIALS_FILE", "credentials.json")
 TOKEN_FILE       = os.environ.get("TOKEN_FILE", str(SUPPORT_DIR / "token.json"))
 OUTPUT_DIR       = os.environ.get("OUTPUT_DIR", "./output")
 
-# Resolve credentials.json robustly:
-def _resolve_credentials_path(p: str) -> str:
-    pth = Path(p)
-    if pth.is_file():
-        return str(pth)
-    # Try support dir
-    pth2 = SUPPORT_DIR / Path(p).name
-    if pth2.is_file():
-        return str(pth2)
-    # Try alongside script (handles pyinstaller & normal)
-    try:
-        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    except Exception:
-        base = Path(__file__).resolve().parent
-    pth3 = base / Path(p).name
-    if pth3.is_file():
-        return str(pth3)
-    raise FileNotFoundError(f"Could not find {p!r}. Looked in: "
-                            f"{Path(p).resolve()}, {pth2}, {pth3}")
-
-# -------------------- Runtime options --------------------
 IMAGE_WIDTH              = 400
 OVERWRITE                = False
 ROBUST_RESUME            = True
 DOWNLOAD_VIDEOS          = True
-DOWNLOAD_IMAGES_ORIGINAL = False   # <— NEW: full-res image download toggle
+DOWNLOAD_IMAGES_ORIGINAL = False
+CONVERT_THUMBS_DIR       = ""   # if set to a local folder path, convert matching thumbnails to originals
 
 LOG_LEVEL        = "INFO"
 LOG_FILENAME     = "drive_fetch.log"
@@ -104,7 +85,13 @@ ALREADY_HAVE_VIDEOS = 0
 # -------------------- Logging --------------------
 
 class ColorFormatter(logging.Formatter):
-    COLORS = {logging.DEBUG: "\033[36m", logging.INFO: "\033[32m", logging.WARNING: "\033[33m", logging.ERROR: "\033[31m", logging.CRITICAL: "\033[41m"}
+    COLORS = {
+        logging.DEBUG: "\033[36m",
+        logging.INFO: "\033[32m",
+        logging.WARNING: "\033[33m",
+        logging.ERROR: "\033[31m",
+        logging.CRITICAL: "\033[41m",
+    }
     RESET = "\033[0m"
     def format(self, record):
         try:
@@ -121,7 +108,9 @@ def setup_logging():
     fmt = "%(asctime)s | %(levelname)-7s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     root = logging.getLogger(); root.setLevel(level)
+    # console
     ch = logging.StreamHandler(sys.stdout); ch.setLevel(level); ch.setFormatter(ColorFormatter(fmt, datefmt)); root.addHandler(ch)
+    # file
     fh = RotatingFileHandler(log_path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
     fh.setLevel(level); fh.setFormatter(logging.Formatter(fmt, datefmt)); root.addHandler(fh)
 
@@ -135,23 +124,42 @@ def elapsed() -> str:
     d = time.time() - START_TS; h = int(d//3600); m = int((d%3600)//60); s = int(d%60)
     return f"{h}h {m}m {s}s" if h else (f"{m}m {s}s" if m else f"{s}s")
 
-def on_sigint(sig, frame):
+def on_sigint(_sig, _frame):
     global INTERRUPTED; INTERRUPTED = True
     logging.warning("Menerima sinyal interupsi — menyelesaikan langkah saat ini lalu meringkas... (Received interrupt signal — finishing current step and summarizing...)")
+
 signal.signal(signal.SIGINT, on_sigint)
 
 # -------------------- Auth / Service --------------------
+
+def _resolve_credentials_path(p: str) -> str:
+    pth = Path(p)
+    if pth.is_file():
+        return str(pth)
+    # Try support dir
+    pth2 = SUPPORT_DIR / Path(p).name
+    if pth2.is_file():
+        return str(pth2)
+    # Try alongside executable / script
+    try:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    except Exception:
+        base = Path(__file__).resolve().parent
+    pth3 = base / Path(p).name
+    if pth3.is_file():
+        return str(pth3)
+    raise FileNotFoundError(
+        f"Could not find {p!r}. Looked in: {Path(p).resolve()}, {pth2}, {pth3}"
+    )
 
 def get_service_and_creds(token_path: str, credentials_path: str):
     from google.auth.transport.requests import Request
     token_path = str(Path(token_path))  # ensure string path
     creds = None
 
-    # Read token if present
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
-    # Refresh or start fresh
     if not creds or not creds.valid:
         try:
             if creds and creds.expired and creds.refresh_token:
@@ -165,7 +173,6 @@ def get_service_and_creds(token_path: str, credentials_path: str):
             flow = InstalledAppFlow.from_client_secrets_file(cred_path_resolved, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # Ensure support dir and write token there even if user pointed elsewhere
         Path(token_path).parent.mkdir(parents=True, exist_ok=True)
         with open(token_path, "w") as f:
             f.write(creds.to_json())
@@ -254,7 +261,10 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
     page_token = None
     while True:
         if INTERRUPTED: return
-        req = service.files().list(q=query, fields=fields, pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="allDrives")
+        req = service.files().list(
+            q=query, fields=fields, pageToken=page_token, supportsAllDrives=True,
+            includeItemsFromAllDrives=True, corpora="allDrives"
+        )
         resp = gapi_execute_with_retry(req)
         for item in resp.get("files", []):
             mime = item.get("mimeType")
@@ -354,7 +364,6 @@ def download_file_resumable(service, creds, file_id: str, target: str, label: st
             logging.info(f"{label} selesai: {os.path.basename(target)} ({human_bytes(downloaded)})"); return True
 
 def download_video_resumable(service, creds, file_id: str, target: str) -> bool:
-    # Keep for backward-compat; call generic with proper label
     return download_file_resumable(service, creds, file_id, target, label="Video")
 
 # -------------------- Target paths --------------------
@@ -384,7 +393,8 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
     if media_kind == "image":
         target = _image_target_path(out_subdir, name, fid, DOWNLOAD_IMAGES_ORIGINAL, file_ext)
         if not OVERWRITE and os.path.exists(target):
-            logging.info(f"= sudah ada (gambar): {target} (= exists, image)"); TOTALS.grand.images_skipped += 1; folder_ctrs.images_skipped += 1; return False
+            logging.info(f"= sudah ada (gambar): {target} (= exists, image)")
+            TOTALS.grand.images_skipped += 1; folder_ctrs.images_skipped += 1; return False
         if DOWNLOAD_IMAGES_ORIGINAL:
             logging.info(f"Mengunduh gambar ukuran asli -> {target} (Downloading image original)")
             ok = download_file_resumable(service, creds, fid, target, label="Gambar")
@@ -399,9 +409,11 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
     elif media_kind == "video":
         target = _video_target_path(out_subdir, name, fid)
         if not OVERWRITE and os.path.exists(target):
-            logging.info(f"= sudah ada (video): {target} (= exists, video)"); TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1; return False
+            logging.info(f"= sudah ada (video): {target} (= exists, video)")
+            TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1; return False
         if not DOWNLOAD_VIDEOS:
-            logging.info("Lewati video (opsi nonaktif). (Skipping video; option disabled.)"); TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1; return False
+            logging.info("Lewati video (opsi nonaktif). (Skipping video; option disabled.)")
+            TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1; return False
         logging.info(f"Mengunduh video -> {target} (Downloading video)")
         ok = download_video_resumable(service, creds, fid, target) if ROBUST_RESUME else _download_video_simple(service, fid, target)
         if ok:
@@ -415,11 +427,20 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
 
 def print_folder_summary(folder_name: str):
     c = TOTALS.folder(folder_name)
-    logging.info(f"[Ringkasan Folder] {folder_name} | dipindai={c.scanned}, gambar: selesai={c.images_done} lewati={c.images_skipped} gagal={c.images_failed}; video: selesai={c.videos_done} lewati={c.videos_skipped} gagal={c.videos_failed} (Folder Summary)")
+    logging.info(
+        f"[Ringkasan Folder] {folder_name} | dipindai={c.scanned}, "
+        f"gambar: selesai={c.images_done} lewati={c.images_skipped} gagal={c.images_failed}; "
+        f"video: selesai={c.videos_done} lewati={c.videos_skipped} gagal={c.videos_failed} (Folder Summary)"
+    )
 
 def print_grand_summary():
     g = TOTALS.grand
-    logging.info(f"[Ringkasan Total] elapsed={elapsed()} | total dipindai={g.scanned} | gambar: selesai={g.images_done} lewati={g.images_skipped} gagal={g.images_failed} | video: selesai={g.videos_done} lewati={g.videos_skipped} gagal={g.videos_failed} | bytes ditulis={human_bytes(g.bytes_written)} (Grand Summary)")
+    logging.info(
+        f"[Ringkasan Total] elapsed={elapsed()} | total dipindai={g.scanned} | "
+        f"gambar: selesai={g.images_done} lewati={g.images_skipped} gagal={g.images_failed} | "
+        f"video: selesai={g.videos_done} lewati={g.videos_skipped} gagal={g.videos_failed} | "
+        f"bytes ditulis={human_bytes(g.bytes_written)} (Grand Summary)"
+    )
 
 def print_progress():
     total_images = EXPECTED_IMAGES; total_videos = EXPECTED_VIDEOS
@@ -427,9 +448,14 @@ def print_progress():
     done_videos = ALREADY_HAVE_VIDEOS + TOTALS.grand.videos_done
     remaining_images = max(0, total_images - done_images)
     remaining_videos = max(0, total_videos - done_videos)
-    logging.info(f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | video {done_videos}/{total_videos} (sisa {remaining_videos}) ([Progress] images {done_images}/{total_images} (left {remaining_images}) | videos {done_videos}/{total_videos} (left {remaining_videos}))")
+    logging.info(
+        f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
+        f"video {done_videos}/{total_videos} (sisa {remaining_videos}) "
+        f"([Progress] images {done_images}/{total_images} (left {remaining_images}) | "
+        f"videos {done_videos}/{total_videos} (left {remaining_videos}))"
+    )
 
-# -------------------- Prescan / Task build --------------------
+# -------------------- Pre-scan --------------------
 
 def prescan_tasks(service) -> List[Dict]:
     global EXPECTED_IMAGES, EXPECTED_VIDEOS, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS
@@ -477,15 +503,16 @@ def prescan_tasks(service) -> List[Dict]:
                         if os.path.exists(vid_target): ALREADY_HAVE_VIDEOS += 1
                         else:
                             if DOWNLOAD_VIDEOS: tasks.append(f)
-                else:
-                    pass
         except Exception as e:
             logging.error(f"Listing gagal untuk {root_name}: {e} (Listing failed)")
         print_folder_summary(root_name)
-    logging.info(f"[Ringkasan Pra-Pindai] gambar={EXPECTED_IMAGES} (sudah {ALREADY_HAVE_IMAGES}) | video={EXPECTED_VIDEOS} (sudah {ALREADY_HAVE_VIDEOS}) (Pre-Scan Summary)")
+    logging.info(
+        f"[Ringkasan Pra-Pindai] gambar={EXPECTED_IMAGES} (sudah {ALREADY_HAVE_IMAGES}) | "
+        f"video={EXPECTED_VIDEOS} (sudah {ALREADY_HAVE_VIDEOS}) (Pre-Scan Summary)"
+    )
     return tasks
 
-# -------------------- Simple (non-resumable) video (kept) --------------------
+# -------------------- Simple (non-resumable) video --------------------
 
 def _download_video_simple(service, file_id: str, target: str) -> bool:
     req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
@@ -506,20 +533,88 @@ def _download_video_simple(service, file_id: str, target: str) -> bool:
 
 def main():
     global TOTALS, EXPECTED_IMAGES, EXPECTED_VIDEOS, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, START_TS, INTERRUPTED
-    TOTALS = Totals(); EXPECTED_IMAGES = 0; EXPECTED_VIDEOS = 0; ALREADY_HAVE_IMAGES = 0; ALREADY_HAVE_VIDEOS = 0
-    START_TS = time.time(); INTERRUPTED = False
+    TOTALS = Totals()
+    EXPECTED_IMAGES = 0
+    EXPECTED_VIDEOS = 0
+    ALREADY_HAVE_IMAGES = 0
+    ALREADY_HAVE_VIDEOS = 0
+    START_TS = time.time()
+    INTERRUPTED = False
     setup_logging()
+
+    # --- Mode A: Convert thumbnails folder → originals in-place ---
+    if CONVERT_THUMBS_DIR:
+        logging.info(f"=== Convert thumbnails in {CONVERT_THUMBS_DIR} to originals ===")
+        service, creds = get_service_and_creds(TOKEN_FILE, CREDENTIALS_FILE)
+
+        thumb_dir = Path(CONVERT_THUMBS_DIR)
+        if not thumb_dir.exists():
+            logging.error(f"Folder not found: {thumb_dir}")
+            print_grand_summary()
+            return
+
+        # Files like: name__<fileid>_w700.jpg (id chars [A-Za-z0-9_-])
+        pat = re.compile(r"__(?P<fid>[A-Za-z0-9_-]+)_w\d+\.jpg$", re.IGNORECASE)
+
+        for path in thumb_dir.rglob("*_w*.jpg"):
+            if INTERRUPTED: break
+            m = pat.search(path.name)
+            if not m:
+                continue
+            fid = m.group("fid")
+
+            # Figure out correct extension from Drive metadata (fallback .jpg)
+            ext_out = ".jpg"
+            try:
+                meta = get_item(service, fid, "id,name,fileExtension")
+                name_on_drive = meta.get("name") or fid
+                _, name_ext = os.path.splitext(name_on_drive)
+                if name_ext:
+                    ext_out = name_ext
+                elif meta.get("fileExtension"):
+                    ext_out = f".{meta['fileExtension']}"
+            except Exception as e:
+                logging.debug(f"Could not query ext for {fid}: {e}; defaulting to .jpg")
+
+            # Remove trailing _w###.jpg to form base
+            base_no_thumb = re.sub(r"_w\d+\.jpg$", "", path.name, flags=re.IGNORECASE)
+            target = path.with_name(f"{base_no_thumb}{ext_out}")
+
+            if target.exists() and not OVERWRITE:
+                logging.info(f"Already have original: {target.name}")
+                TOTALS.grand.images_skipped += 1
+                continue
+
+            logging.info(f"Fetching original for {path.name} (id={fid}) -> {target.name}")
+            ok = download_file_resumable(service, creds, fid, str(target), label="Image")
+            if ok:
+                TOTALS.grand.images_done += 1
+            else:
+                TOTALS.grand.images_failed += 1
+
+        print_grand_summary()
+        return  # inside main()
+
+    # --- Mode B: Normal Drive crawl (previews + videos and/or original images) ---
     logging.info("=== Ambil Pratinjau Drive (gambar) + Video Penuh (Drive Low-Res + Full Videos) ===")
-    logging.info(f"Folder keluaran: {OUTPUT_DIR} (Output dir)")
-    logging.info(f"Lebar gambar: {IMAGE_WIDTH}px | Overwrite: {OVERWRITE} | Resume: {ROBUST_RESUME} | Unduh video: {DOWNLOAD_VIDEOS} | Gambar asli: {DOWNLOAD_IMAGES_ORIGINAL}")
+    logging.info(
+        f"Folder keluaran: {OUTPUT_DIR} (Output dir)\n"
+        f"Lebar gambar: {IMAGE_WIDTH}px | Overwrite: {OVERWRITE} | Resume: {ROBUST_RESUME} | "
+        f"Unduh video: {DOWNLOAD_VIDEOS} | Gambar asli: {DOWNLOAD_IMAGES_ORIGINAL}"
+    )
     ensure_dir(OUTPUT_DIR)
+
     service, creds = get_service_and_creds(TOKEN_FILE, CREDENTIALS_FILE)
     tasks = prescan_tasks(service)
     for f in tasks:
-        if INTERRUPTED: break
+        if INTERRUPTED:
+            break
         ok = process_file(service, creds, f, f['__folder_out'], counters_key=f['__root_name'])
-        if ok: print_progress()
-    print_progress(); print_grand_summary()
+        if ok:
+            print_progress()
+
+    print_progress()
+    print_grand_summary()
     logging.info("Selesai. (Done.)")
 
 if __name__ == "__main__":
