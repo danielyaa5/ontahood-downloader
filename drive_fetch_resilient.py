@@ -439,6 +439,7 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
                         "name":          item.get("name", "shortcut"),
                         "mimeType":      target_mime or mime,
                         "fileExtension": item.get("fileExtension"),
+                        "size":          item.get("size"),  # Copy size from original item
                         "__rel_path":    rel_path,
                         "__from_shortcut": True,
                     }
@@ -760,6 +761,13 @@ def prescan_tasks(service) -> List[Dict]:
                     rel = f.get("__rel_path","")
                     target_dir = os.path.join(folder_out, rel); ensure_dir(target_dir)
                     base, ext = os.path.splitext(f.get("name","file"))
+                    
+                    # Debug: log file size info
+                    file_size = f.get("size")
+                    logging.debug(L(
+                        f"File {f.get('name', 'unknown')}: kind={kind}, size={file_size}, from_shortcut={f.get('__from_shortcut', False)}",
+                        f"File {f.get('name', 'unknown')}: jenis={kind}, ukuran={file_size}, dari_shortcut={f.get('__from_shortcut', False)}"
+                    ))
                     if kind == "image":
                         link_images += 1
                         with _LOCK:
@@ -785,6 +793,16 @@ def prescan_tasks(service) -> List[Dict]:
                                     link_images_bytes += sz
                                 except Exception:
                                     pass
+                            else:
+                                # For thumbnail downloads, estimate size based on typical thumbnail sizes
+                                # Most thumbnails are 50-200KB depending on complexity and compression
+                                try:
+                                    # Use a conservative estimate: 100KB per thumbnail
+                                    # This gives users a rough idea of data usage
+                                    estimated_thumb_size = 100 * 1024  # 100KB
+                                    link_images_bytes += estimated_thumb_size
+                                except Exception:
+                                    pass
                     else:
                         link_videos += 1
                         with _LOCK:
@@ -804,8 +822,12 @@ def prescan_tasks(service) -> List[Dict]:
                                         meta = get_item(svc, fid, "size")
                                         sz = int(meta.get("size") or 0)
                                     link_videos_bytes += sz
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    # Log when we can't get video size for debugging
+                                    logging.debug(L(
+                                        f"Could not get size for video {fid}: {e}",
+                                        f"Tidak bisa mendapatkan ukuran untuk video {fid}: {e}"
+                                    ))
         except Exception as e:
             logging.error(L(f"Listing failed for URL {url}: {e}", f"Listing gagal untuk URL {url}: {e}"))
             return local_tasks
