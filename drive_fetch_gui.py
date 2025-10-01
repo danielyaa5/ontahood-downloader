@@ -97,6 +97,7 @@ I18N = {
         "missing_conv_dir_msg": "Please choose the folder that contains your selected thumbnails.",
         "log_conv_using": "[GUI] Converting thumbnails in: {path}",
         "log_conv_start": "[GUI] Starting original-size fetch for files in this folder…",
+        "concurrency_hint": "(1-2: slow connection, 3-4: good balance, 5-8: fast connection with unlimited data)",
     },
     "id": {
         "app_title": "Drive Fetch",
@@ -148,6 +149,7 @@ I18N = {
         "missing_conv_dir_msg": "Silakan pilih folder yang berisi thumbnail pilihan Anda.",
         "log_conv_using": "[GUI] Mengonversi thumbnail di: {path}",
         "log_conv_start": "[GUI] Memulai unduhan gambar ukuran asli untuk file di folder ini…",
+        "concurrency_hint": "(1-2: koneksi lambat, 3-4: seimbang, 5-8: koneksi cepat dengan kuota tak terbatas)",
     },
 }
 
@@ -603,8 +605,6 @@ class App(tk.Tk):
         self.out_entry.pack(side="left", fill="x", expand=True, padx=8)
         self.choose_btn = ttk.Button(row, command=self.pick_out)
         self.choose_btn.pack(side="left")
-        self.open_btn = ttk.Button(row, text="Open", command=self.open_outdir)
-        self.open_btn.pack(side="left", padx=(6,0))
 
         psz = ttk.Frame(self); psz.pack(fill="x", padx=12)
         self.mode_label = ttk.Label(psz)
@@ -626,12 +626,16 @@ class App(tk.Tk):
         self.cancel_btn = ttk.Button(btnrow, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="left")
 
-        # Advanced: concurrency control
+        # Advanced: concurrency control with helpful guidance
         adv = ttk.Frame(self); adv.pack(fill="x", padx=12, pady=(0,6))
         ttk.Label(adv, text="Parallel downloads:").pack(side="left")
         self.concurrent_var = tk.IntVar(value=3)
         self.concurrent_spin = tk.Spinbox(adv, from_=1, to=8, textvariable=self.concurrent_var, width=4)
         self.concurrent_spin.pack(side="left", padx=(6,0))
+        
+        # Guidance for parallel downloads
+        self.concurrency_hint = ttk.Label(adv, font=("TkDefaultFont", 8))
+        self.concurrency_hint.pack(side="left", padx=(8,0))
 
         # --- CONVERTER (below) ---
         sep = ttk.Separator(self, orient="horizontal"); sep.pack(fill="x", padx=12, pady=(6, 8))
@@ -965,6 +969,8 @@ class App(tk.Tk):
         self.conv_pick_label.configure(text=T(self.lang, "conv_pick_label"))
         self.conv_choose_btn.configure(text=T(self.lang, "conv_btn_choose"))
         self.conv_start_btn.configure(text=T(self.lang, "conv_btn_start"))
+        # Concurrency guidance
+        self.concurrency_hint.configure(text=T(self.lang, "concurrency_hint"))
         # Update language selector label text
         self.lang_box.configure(values=[T("en", "lang_en"), T("id", "lang_id")])
         self.lang_var.set(T(self.lang, "lang_en") if self.lang == "en" else T(self.lang, "lang_id"))
@@ -985,19 +991,6 @@ class App(tk.Tk):
         d = filedialog.askdirectory()
         if d: self.outvar.set(d)
 
-    def open_outdir(self):
-        p = self.outvar.get().strip()
-        if not p:
-            return
-        try:
-            if sys.platform == "darwin":
-                os.system(f"open '{p.replace("'", "'\\''")}'")
-            elif sys.platform.startswith("win"):
-                os.startfile(p)  # type: ignore[attr-defined]
-            else:
-                os.system(f"xdg-open '{p.replace("'", "'\\''")}'")
-        except Exception:
-            pass
 
     def pick_conv_dir(self):
         d = filedialog.askdirectory()
