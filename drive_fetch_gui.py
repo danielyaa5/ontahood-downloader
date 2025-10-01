@@ -379,18 +379,15 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                     msg = self.format(record)
                     log.put(msg)
                     if "[Progress]" in msg:
-                        # Update images/videos progress if we can parse counts
-                        # Backend now reports: images done_total/expected_total | videos done_total/expected_total
-                        # where done_total includes both newly downloaded + already existing files
+                        # Parse progress from backend logging
+                        # Backend reports: images done/total (left remaining) | videos done/total (left remaining)
+                        # where done includes both newly downloaded + already existing files
                         mi = re.findall(r"(\d+)/(\d+)", msg)
                         if mi:
-                            # Parse progress for images, videos, and data files
+                            # First pair for images, second for videos if present
                             app_ref.update_progress_images(int(mi[0][0]), int(mi[0][1]))
                             if len(mi) > 1:
                                 app_ref.update_progress_videos(int(mi[1][0]), int(mi[1][1]))
-                            if len(mi) > 2:
-                                # Third pair is for data files (if any)
-                                app_ref.update_progress_data(int(mi[2][0]), int(mi[2][1]))
                     if msg.startswith("[Bytes] "):
                         try:
                             bw = int(msg.split()[1])
@@ -687,20 +684,6 @@ class App(tk.Tk):
         self.progress_videos.pack(side="left", padx=(8,8))
         self.progress_videos_value = ttk.Label(vid_frame, text="0/0"); self.progress_videos_value.pack(side="left")
 
-        # Data files progress (PDFs, documents, etc.)
-        data_frame = ttk.Frame(prow); data_frame.pack(fill="x", pady=(0,6))
-        self.data_label = ttk.Label(data_frame, text="Data:")
-        self.data_label.pack(side="left")
-        self.progress_data = ttk.Progressbar(data_frame, length=520, mode="determinate")
-        self.progress_data.pack(side="left", padx=(8,8))
-        self.progress_data_value = ttk.Label(data_frame, text="0/0"); self.progress_data_value.pack(side="left")
-        
-        # Data transfer (bytes) progress
-        bytes_frame = ttk.Frame(prow); bytes_frame.pack(fill="x")
-        ttk.Label(bytes_frame, text="Transfer:").pack(side="left")
-        self.progress_bytes = ttk.Progressbar(bytes_frame, length=520, mode="determinate")
-        self.progress_bytes.pack(side="left", padx=(8,8))
-        self.progress_bytes_value = ttk.Label(bytes_frame, text="0 / 0"); self.progress_bytes_value.pack(side="left")
         self.expected_bytes_total = 0
         self.bytes_written = 0
 
@@ -995,7 +978,6 @@ class App(tk.Tk):
         self.log_title.configure(text=T(self.lang, "log"))
         self.images_label.configure(text=T(self.lang, "images"))
         self.videos_label.configure(text=T(self.lang, "videos"))
-        self.data_label.configure(text=T(self.lang, "data"))
         # Converter labels
         self.conv_title.configure(text=T(self.lang, "conv_title"))
         self.conv_subtitle.configure(text=T(self.lang, "conv_subtitle"))
@@ -1092,13 +1074,13 @@ class App(tk.Tk):
             screen_w = sel_win.winfo_screenwidth()
         except Exception:
             screen_w = 1440
-        # Calculate minimum width needed for all columns (6+24+12+8+12+8+12+8 = ~90 chars * ~8px + padding)
-        min_needed_w = 1200  # Conservative estimate for all columns including data
-        max_w = max(900, screen_w - 100)  # Leave some screen margin
+        # Calculate minimum width needed for all columns (8+34+16+12+16+12 = 98 chars * ~8px + padding)
+        min_needed_w = 1100  # Conservative estimate for all columns
+        max_w = max(800, screen_w - 100)  # Leave some screen margin
         init_w = min(min_needed_w, max_w)
         try:
             sel_win.geometry(f"{init_w}x520")
-            sel_win.minsize(1100, 360)  # Ensure minimum width shows all columns
+            sel_win.minsize(1000, 360)  # Ensure minimum width shows all columns
         except Exception:
             pass
         frm = ttk.Frame(sel_win); frm.pack(fill="both", expand=True, padx=12, pady=12)
@@ -1123,16 +1105,14 @@ class App(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         sbar.pack(side="right", fill="y")
 
-        # Header row (columns) - adjusted widths for better fit  
+        # Header row (columns) - back to original layout
         header = ttk.Frame(inner); header.pack(fill="x", pady=(0,4))
-        ttk.Label(header, text="✓", width=6).grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="Folder", width=24).grid(row=0, column=1, sticky="w")
-        ttk.Label(header, text="Images (have)", width=12).grid(row=0, column=2, sticky="w")
-        ttk.Label(header, text="Img Size", width=8).grid(row=0, column=3, sticky="w")
-        ttk.Label(header, text="Videos (have)", width=12).grid(row=0, column=4, sticky="w")
-        ttk.Label(header, text="Vid Size", width=8).grid(row=0, column=5, sticky="w")
-        ttk.Label(header, text="Data (have)", width=12).grid(row=0, column=6, sticky="w")
-        ttk.Label(header, text="Data Size", width=8).grid(row=0, column=7, sticky="w")
+        ttk.Label(header, text="✓", width=8).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Folder", width=34).grid(row=0, column=1, sticky="w")
+        ttk.Label(header, text="Images (have)", width=16).grid(row=0, column=2, sticky="w")
+        ttk.Label(header, text="Img Size", width=12).grid(row=0, column=3, sticky="w")
+        ttk.Label(header, text="Videos (have)", width=16).grid(row=0, column=4, sticky="w")
+        ttk.Label(header, text="Vid Size", width=12).grid(row=0, column=5, sticky="w")
 
         rows_container = ttk.Frame(inner); rows_container.pack(fill="x")
         vars_by_root = {}
@@ -1156,11 +1136,11 @@ class App(tk.Tk):
             exp_bytes = 0
             for s in dfr.LINK_SUMMARIES:
                 if s.get("root_name") in selected_roots:
-                    exp_bytes += int(s.get("images_bytes") or 0) + int(s.get("videos_bytes") or 0) + int(s.get("data_bytes") or 0)
+                    exp_bytes += int(s.get("images_bytes") or 0) + int(s.get("videos_bytes") or 0)
             self.expected_bytes_total = exp_bytes
             # Start worker
             sel_win.destroy()
-            self.update_progress_images(0,0); self.update_progress_videos(0,0); self.update_progress_data(0,0)
+            self.update_progress_images(0,0); self.update_progress_videos(0,0)
             t = threading.Thread(
                 target=run_worker,
                 args=(urls, outdir, self.log_handler, self.start_btn, width, self.videos_var.get(), img_original, self, self.lang),
@@ -1199,25 +1179,23 @@ class App(tk.Tk):
             try:
                 rn = summary.get("root_name")
                 var = tk.BooleanVar()
-                # Explicitly set the value after creating the variable to avoid indeterminate state
-                var.set(True)
                 vars_by_root[rn] = var
                 
                 row = ttk.Frame(rows_container)
                 row.pack(fill="x", pady=1)
                 
-                # Create checkbox with explicit state to prevent "-" display on macOS
-                checkbox = ttk.Checkbutton(row, variable=var, width=6)
+                # Create checkbox using tk.Checkbutton to avoid macOS indeterminate state issue
+                checkbox = tk.Checkbutton(row, variable=var, width=8, anchor="w")
                 checkbox.grid(row=0, column=0, sticky="w")
-                # Force update the display state
-                checkbox.state(['!alternate'])
+                # Explicitly set to checked state
+                var.set(1)  # Use 1 instead of True for tk.Checkbutton
                 
                 # Folder name with tooltip
-                folder_name = rn[:22] + "..." if len(rn) > 25 else rn
-                folder_label = ttk.Label(row, text=folder_name, width=24)
+                folder_name = rn[:31] + "..." if len(rn) > 34 else rn
+                folder_label = ttk.Label(row, text=folder_name, width=34)
                 folder_label.grid(row=0, column=1, sticky="w")
                 
-                if len(rn) > 25:
+                if len(rn) > 34:
                     try:
                         def on_enter(event, full_name=rn):
                             folder_label.configure(text=full_name)
@@ -1228,16 +1206,13 @@ class App(tk.Tk):
                     except Exception:
                         pass
                 
-                # File counts and sizes
-                ttk.Label(row, text=f"{summary.get('images')} (have {summary.get('images_existing')})", width=12).grid(row=0, column=2, sticky="w")
+                # File counts and sizes - back to original layout
+                ttk.Label(row, text=f"{summary.get('images')} (have {summary.get('images_existing')})", width=16).grid(row=0, column=2, sticky="w")
                 img_bytes = _hb(summary.get('images_bytes') or 0)
-                ttk.Label(row, text=img_bytes, width=8).grid(row=0, column=3, sticky="w")
-                ttk.Label(row, text=f"{summary.get('videos')} (have {summary.get('videos_existing')})", width=12).grid(row=0, column=4, sticky="w")
+                ttk.Label(row, text=img_bytes, width=12).grid(row=0, column=3, sticky="w")
+                ttk.Label(row, text=f"{summary.get('videos')} (have {summary.get('videos_existing')})", width=16).grid(row=0, column=4, sticky="w")
                 vid_bytes = _hb(summary.get('videos_bytes') or 0)
-                ttk.Label(row, text=vid_bytes, width=8).grid(row=0, column=5, sticky="w")
-                ttk.Label(row, text=f"{summary.get('data', 0)} (have {summary.get('data_existing', 0)})", width=12).grid(row=0, column=6, sticky="w")
-                data_bytes = _hb(summary.get('data_bytes') or 0)
-                ttk.Label(row, text=data_bytes, width=8).grid(row=0, column=7, sticky="w")
+                ttk.Label(row, text=vid_bytes, width=12).grid(row=0, column=5, sticky="w")
                 
                 # Auto-resize window if needed
                 sel_win.update_idletasks()
@@ -1275,9 +1250,9 @@ class App(tk.Tk):
                 folder_out = os.path.join(base_out, root_name)
                 dfr.ensure_dir(folder_out)
                 
-                link_images = 0; link_videos = 0; link_data = 0
-                link_images_existing = 0; link_videos_existing = 0; link_data_existing = 0
-                link_images_bytes = 0; link_videos_bytes = 0; link_data_bytes = 0
+                link_images = 0; link_videos = 0
+                link_images_existing = 0; link_videos_existing = 0
+                link_images_bytes = 0; link_videos_bytes = 0
                 local_tasks = []
                 
                 # Use a generator with external cancellation check
@@ -1295,7 +1270,7 @@ class App(tk.Tk):
                     fext = f.get("fileExtension")
                     kind = dfr.classify_media(mime, f.get("name", ""), fext)
                     
-                    if kind in ("image", "video", "data"):
+                    if kind in ("image", "video"):
                         f["__root_name"] = root_name
                         f["__folder_out"] = folder_out
                         rel = f.get("__rel_path", "")
@@ -1385,47 +1360,6 @@ class App(tk.Tk):
                                     except Exception:
                                         link_videos_bytes += 50 * 1024 * 1024  # 50MB estimate
                                 # Note: Videos are counted even when video downloads are disabled
-                        elif kind == "data":
-                            link_data += 1
-                            # Determine correct file extension for data files
-                            if not ext:
-                                if "pdf" in mime.lower():
-                                    ext = ".pdf"
-                                elif "text" in mime.lower():
-                                    ext = ".txt"
-                                elif fext:
-                                    ext = f".{fext}"
-                                else:
-                                    ext = ".dat"
-                            data_target = os.path.join(target_dir, f"{base}__{fid}{ext}")
-                            
-                            if os.path.exists(data_target):
-                                link_data_existing += 1
-                                # Include size for existing data files
-                                try:
-                                    local_size = os.path.getsize(data_target)
-                                    link_data_bytes += local_size
-                                except Exception:
-                                    # Fallback to Drive API or estimate
-                                    try:
-                                        sz = int(f.get("size") or 0)
-                                        if not sz:
-                                            meta = dfr.get_item(svc, fid, "size")
-                                            sz = int(meta.get("size") or 0)
-                                        link_data_bytes += sz
-                                    except Exception:
-                                        # Estimate data file size
-                                        link_data_bytes += 1024 * 1024  # 1MB estimate
-                            else:
-                                local_tasks.append(f)
-                                try:
-                                    sz = int(f.get("size") or 0)
-                                    if not sz:
-                                        meta = dfr.get_item(svc, fid, "size")
-                                        sz = int(meta.get("size") or 0)
-                                    link_data_bytes += sz
-                                except Exception:
-                                    link_data_bytes += 1024 * 1024  # 1MB estimate
                 
                 # Create summary for this folder
                 summary = {
@@ -1436,9 +1370,6 @@ class App(tk.Tk):
                     "videos": link_videos,
                     "videos_existing": link_videos_existing,
                     "videos_bytes": link_videos_bytes,
-                    "data": link_data,
-                    "data_existing": link_data_existing,
-                    "data_bytes": link_data_bytes,
                     "url": url,
                 }
                 
@@ -1589,14 +1520,24 @@ class App(tk.Tk):
             setattr(dfr, "INTERRUPTED", True)
             try:
                 loader_pb.stop()
+                loader_pb.pack_forget()
             except Exception:
                 pass
-            # Reset interrupt flag for next run
+            
+            # Show cancelled message immediately
             try:
-                # Brief delay to let threads see the cancellation, then reset for next scan
-                self.after(100, lambda: setattr(dfr, "INTERRUPTED", False))
+                loader_label.configure(text="Scan cancelled by user.")
             except Exception:
                 pass
+                
+            # Reset interrupt flag after a moment for next scan
+            def reset_interrupt():
+                try:
+                    setattr(dfr, "INTERRUPTED", False)
+                except Exception:
+                    pass
+            self.after(500, reset_interrupt)
+            
             self.start_btn.configure(state="normal")
             sel_win.destroy()
         
@@ -1610,7 +1551,7 @@ class App(tk.Tk):
         local_dir = self.conv_dir_var.get().strip()
         if not local_dir:
             messagebox.showerror(T(self.lang, "missing_conv_dir_title"), T(self.lang, "missing_conv_dir_msg")); return
-        self.update_progress_images(0,0); self.update_progress_videos(0,0); self.update_progress_data(0,0)  # Reset all progress bars
+        self.update_progress_images(0,0); self.update_progress_videos(0,0)  # Reset progress bars
         t = threading.Thread(
             target=run_converter,
             args=(local_dir, self.log_handler, self.conv_start_btn, self, self.lang),
@@ -1634,13 +1575,6 @@ class App(tk.Tk):
         self.progress_videos_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
         self.update_idletasks()
 
-    def update_progress_data(self, done, total):
-        total = max(total, 0)
-        done = min(max(done,0), total) if total else 0
-        self.progress_data["maximum"] = total if total else 1
-        self.progress_data["value"] = done
-        self.progress_data_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
-        self.update_idletasks()
 
     def update_progress_bytes(self, bytes_written):
         self.bytes_written = max(0, int(bytes_written))
