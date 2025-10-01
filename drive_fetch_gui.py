@@ -1196,13 +1196,19 @@ class App(tk.Tk):
             nonlocal vars_by_root
             try:
                 rn = summary.get("root_name")
-                var = tk.BooleanVar(value=True)
+                var = tk.BooleanVar()
+                # Explicitly set the value after creating the variable to avoid indeterminate state
+                var.set(True)
                 vars_by_root[rn] = var
                 
                 row = ttk.Frame(rows_container)
                 row.pack(fill="x", pady=1)
                 
-                ttk.Checkbutton(row, variable=var, width=6).grid(row=0, column=0, sticky="w")
+                # Create checkbox with explicit state to prevent "-" display on macOS
+                checkbox = ttk.Checkbutton(row, variable=var, width=6)
+                checkbox.grid(row=0, column=0, sticky="w")
+                # Force update the display state
+                checkbox.state(['!alternate'])
                 
                 # Folder name with tooltip
                 folder_name = rn[:28] + "..." if len(rn) > 31 else rn
@@ -1237,12 +1243,20 @@ class App(tk.Tk):
         def _scan_single_url(url, url_index):
             """Scan a single URL and update UI progressively"""
             try:
+                # Check for cancellation before starting
+                if scan_cancelled.is_set():
+                    return []
+                    
                 # Create thread-local service
                 svc, _ = dfr.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
                 
+                # Check for cancellation after credentials
+                if scan_cancelled.is_set():
+                    return []
+                
                 folder_id = dfr.extract_folder_id(url)
                 name, ok = dfr.resolve_folder(svc, folder_id)
-                if not ok:
+                if not ok or scan_cancelled.is_set():
                     return []
                     
                 # Update status to show current folder being scanned
@@ -1261,7 +1275,7 @@ class App(tk.Tk):
                 local_tasks = []
                 
                 for f in dfr.list_folder_recursive(svc, folder_id, rel_path=""):
-                    if scan_cancelled.is_set():
+                    if dfr.INTERRUPTED or scan_cancelled.is_set(): 
                         break
                         
                     fid = f.get("id")
@@ -1448,10 +1462,16 @@ class App(tk.Tk):
                     # Process completed scans as they finish
                     for future in dfr.as_completed(future_to_url):
                         if scan_cancelled.is_set():
+                            # Cancel remaining futures
+                            for remaining_future in future_to_url:
+                                if not remaining_future.done():
+                                    remaining_future.cancel()
                             break
                             
                         try:
-                            tasks = future.result()
+                            tasks = future.result(timeout=1)  # Add timeout to avoid hanging
+                            if tasks:  # Only add tasks if not empty (not cancelled)
+                                all_tasks.extend(tasks)
                             completed_scans += 1
                             
                             # Update progress
@@ -1471,7 +1491,10 @@ class App(tk.Tk):
                     except Exception:
                         pass
                     
-                    if dfr.LINK_SUMMARIES:
+                    if scan_cancelled.is_set():
+                        loader_label.configure(text="Scan cancelled.")
+                        start_sel_btn.configure(state="disabled")
+                    elif dfr.LINK_SUMMARIES:
                         loader_label.configure(text="Scan complete. Select folders and click Start.")
                         start_sel_btn.configure(state="normal", command=lambda: _start_selected(all_tasks))
                     else:
@@ -1503,9 +1526,18 @@ class App(tk.Tk):
         
         # Update cancel function to stop parallel scans
         def _cancel_sel_new():
+            # Set cancellation flag that threads will check
             scan_cancelled.set()
+            # Also set backend interrupt flag to stop any ongoing Drive API calls
+            setattr(dfr, "INTERRUPTED", True)
             try:
                 loader_pb.stop()
+            except Exception:
+                pass
+            # Reset interrupt flag for next run
+            try:
+                # Brief delay to let threads see the cancellation, then reset for next scan
+                self.after(100, lambda: setattr(dfr, "INTERRUPTED", False))
             except Exception:
                 pass
             self.start_btn.configure(state="normal")
