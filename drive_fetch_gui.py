@@ -1143,23 +1143,198 @@ class App(tk.Tk):
         start_sel_btn.pack(side="right")
         ttk.Button(btns, text="Cancel", command=_cancel_sel).pack(side="right", padx=(0,6))
 
-        # Background prescan thread
-        def _prescan():
-            # Attach GUI log handler for pre-scan so errors/info show in the log view with levels/colors
-            gh = None
+        # State for progressive updates
+        completed_scans = 0
+        total_urls = len(urls)
+        all_tasks = []
+        scan_lock = threading.Lock()
+        scan_cancelled = threading.Event()
+        
+        def _update_progress_status(current, total, current_folder=None):
+            """Update the progress status in the loader area"""
+            if current_folder:
+                status_text = f"Scanning {current}/{total}: {current_folder}..."
+            else:
+                status_text = f"Scanning folders... {current}/{total} complete"
             try:
-                # Ensure log language matches UI
-                try:
-                    setattr(dfr, "LANG", self.lang)
-                except Exception:
-                    pass
-                # Ensure backend console/file logging is configured for pre-scan (without duplicating handlers later)
+                loader_label.configure(text=status_text)
+                # Update progress bar to show completion percentage
+                if total > 0:
+                    progress_pct = (current / total) * 100
+                    loader_pb.configure(mode="determinate", maximum=100, value=progress_pct)
+            except Exception:
+                pass
+        
+        def _add_folder_row(summary):
+            """Add a single folder row to the preview (called from main thread)"""
+            nonlocal vars_by_root
+            try:
+                rn = summary.get("root_name")
+                var = tk.BooleanVar(value=True)
+                vars_by_root[rn] = var
+                
+                row = ttk.Frame(rows_container)
+                row.pack(fill="x", pady=1)
+                
+                ttk.Checkbutton(row, variable=var, width=6).grid(row=0, column=0, sticky="w")
+                
+                # Folder name with tooltip
+                folder_name = rn[:28] + "..." if len(rn) > 31 else rn
+                folder_label = ttk.Label(row, text=folder_name, width=30)
+                folder_label.grid(row=0, column=1, sticky="w")
+                
+                if len(rn) > 31:
+                    try:
+                        def on_enter(event, full_name=rn):
+                            folder_label.configure(text=full_name)
+                        def on_leave(event, short_name=folder_name):
+                            folder_label.configure(text=short_name)
+                        folder_label.bind("<Enter>", on_enter)
+                        folder_label.bind("<Leave>", on_leave)
+                    except Exception:
+                        pass
+                
+                # File counts and sizes
+                ttk.Label(row, text=f"{summary.get('images')} (have {summary.get('images_existing')})", width=14).grid(row=0, column=2, sticky="w")
+                img_bytes = _hb(summary.get('images_bytes') or 0)
+                ttk.Label(row, text=img_bytes, width=10).grid(row=0, column=3, sticky="w")
+                ttk.Label(row, text=f"{summary.get('videos')} (have {summary.get('videos_existing')})", width=14).grid(row=0, column=4, sticky="w")
+                vid_bytes = _hb(summary.get('videos_bytes') or 0)
+                ttk.Label(row, text=vid_bytes, width=10).grid(row=0, column=5, sticky="w")
+                
+                # Auto-resize window if needed
+                sel_win.update_idletasks()
+                
+            except Exception as e:
+                logging.debug(f"Error adding folder row: {e}")
+        
+        def _scan_single_url(url, url_index):
+            """Scan a single URL and update UI progressively"""
+            try:
+                # Create thread-local service
+                svc, _ = dfr.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+                
+                folder_id = dfr.extract_folder_id(url)
+                name, ok = dfr.resolve_folder(svc, folder_id)
+                if not ok:
+                    return []
+                    
+                # Update status to show current folder being scanned
+                self.after(0, lambda: _update_progress_status(url_index, total_urls, name))
+                
+                # Scan this folder
+                url_label = dfr.safe_filename(url)[:160]
+                base_out = os.path.join(outdir, url_label)
+                dfr.ensure_dir(base_out)
+                root_name = name
+                folder_out = os.path.join(base_out, root_name)
+                dfr.ensure_dir(folder_out)
+                
+                link_images = 0; link_videos = 0; link_images_existing = 0; link_videos_existing = 0
+                link_images_bytes = 0; link_videos_bytes = 0
+                local_tasks = []
+                
+                for f in dfr.list_folder_recursive(svc, folder_id, rel_path=""):
+                    if scan_cancelled.is_set():
+                        break
+                        
+                    fid = f.get("id")
+                    mime = f.get("mimeType", "")
+                    fext = f.get("fileExtension")
+                    kind = dfr.classify_media(mime, f.get("name", ""), fext)
+                    
+                    if kind in ("image", "video"):
+                        f["__root_name"] = root_name
+                        f["__folder_out"] = folder_out
+                        rel = f.get("__rel_path", "")
+                        target_dir = os.path.join(folder_out, rel)
+                        dfr.ensure_dir(target_dir)
+                        base, ext = os.path.splitext(f.get("name", "file"))
+                        
+                        if kind == "image":
+                            link_images += 1
+                            if img_original:
+                                ext_out = ext or (("." + fext) if fext else ".jpg")
+                                img_target = os.path.join(target_dir, f"{base}__{fid}{ext_out}")
+                            else:
+                                img_target = os.path.join(target_dir, f"{base}__{fid}_w{width}.jpg")
+                                
+                            if os.path.exists(img_target):
+                                link_images_existing += 1
+                            else:
+                                local_tasks.append(f)
+                                if img_original:
+                                    try:
+                                        sz = int(f.get("size") or 0)
+                                        if not sz:
+                                            meta = dfr.get_item(svc, fid, "size")
+                                            sz = int(meta.get("size") or 0)
+                                        link_images_bytes += sz
+                                    except Exception:
+                                        pass
+                                else:
+                                    # Estimate thumbnail size
+                                    link_images_bytes += 100 * 1024  # 100KB estimate
+                        else:  # video
+                            link_videos += 1
+                            ext_out = ext or ".mp4"
+                            vid_target = os.path.join(target_dir, f"{base}__{fid}{ext_out}")
+                            
+                            if os.path.exists(vid_target):
+                                link_videos_existing += 1
+                            else:
+                                if self.videos_var.get():
+                                    local_tasks.append(f)
+                                    try:
+                                        sz = int(f.get("size") or 0)
+                                        if not sz:
+                                            meta = dfr.get_item(svc, fid, "size")
+                                            sz = int(meta.get("size") or 0)
+                                        link_videos_bytes += sz
+                                    except Exception:
+                                        pass
+                
+                # Create summary for this folder
+                summary = {
+                    "root_name": root_name,
+                    "images": link_images,
+                    "images_existing": link_images_existing,
+                    "images_bytes": link_images_bytes,
+                    "videos": link_videos,
+                    "videos_existing": link_videos_existing,
+                    "videos_bytes": link_videos_bytes,
+                    "url": url,
+                }
+                
+                # Thread-safe updates
+                with scan_lock:
+                    dfr.LINK_SUMMARIES.append(summary)
+                    all_tasks.extend(local_tasks)
+                
+                # Update UI on main thread
+                self.after(0, lambda s=summary: _add_folder_row(s))
+                
+                return local_tasks
+                
+            except Exception as e:
+                logging.error(f"Scan error for URL {url}: {e}")
+                return []
+        
+        def _prescan_parallel():
+            """Run parallel pre-scan with progressive updates"""
+            nonlocal completed_scans
+            gh = None
+            
+            try:
+                # Set up logging
+                setattr(dfr, "LANG", self.lang)
                 try:
                     root_logger = dfr.logging.getLogger()
                     if not root_logger.handlers:
                         dfr.setup_logging()
                 except Exception:
                     pass
+                    
                 # Bridge backend logging into Tk log view
                 logh = self.log_handler
                 class _GuiHandler(dfr.logging.Handler):
@@ -1169,117 +1344,113 @@ class App(tk.Tk):
                             logh.put(msg)
                         except Exception:
                             pass
+                            
                 fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
-                gh = _GuiHandler(); gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO)); gh.setFormatter(fmt)
+                gh = _GuiHandler()
+                gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO))
+                gh.setFormatter(fmt)
                 dfr.logging.getLogger().addHandler(gh)
-
+                
                 dfr.reset_counters()
-                # Configure backend globals for prescan
+                # Configure backend globals
                 setattr(dfr, "FOLDER_URLS", urls)
                 setattr(dfr, "OUTPUT_DIR", str(outdir))
                 setattr(dfr, "IMAGE_WIDTH", int(width))
                 setattr(dfr, "DOWNLOAD_VIDEOS", bool(self.videos_var.get()))
                 setattr(dfr, "DOWNLOAD_IMAGES_ORIGINAL", bool(img_original))
-
-                # Ensure credentials are resolved before attempting service creation
+                
+                # Ensure credentials
                 cred_path = locate_credentials()
                 if cred_path is None:
                     raise RuntimeError("credentials.json not found — click Sign in or place credentials.json next to the app.")
-                try:
-                    dfr.CREDENTIALS_FILE = str(cred_path)
-                except Exception:
-                    pass
-
-                service, _creds = dfr.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
-                tasks = dfr.prescan_tasks(service)
+                setattr(dfr, "CREDENTIALS_FILE", str(cred_path))
+                
+                # Run scans in parallel (limit to 3 concurrent to avoid rate limits)
+                max_workers = min(3, len(urls))
+                completed_scans = 0
+                
+                self.after(0, lambda: _update_progress_status(0, total_urls))
+                
+                with dfr.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all scan jobs
+                    future_to_url = {}
+                    for i, url in enumerate(urls):
+                        if scan_cancelled.is_set():
+                            break
+                        future = executor.submit(_scan_single_url, url, i + 1)
+                        future_to_url[future] = url
+                    
+                    # Process completed scans as they finish
+                    for future in dfr.as_completed(future_to_url):
+                        if scan_cancelled.is_set():
+                            break
+                            
+                        try:
+                            tasks = future.result()
+                            completed_scans += 1
+                            
+                            # Update progress
+                            self.after(0, lambda: _update_progress_status(completed_scans, total_urls))
+                            
+                        except Exception as e:
+                            url = future_to_url[future]
+                            logging.error(f"Scan failed for {url}: {e}")
+                            completed_scans += 1
+                            self.after(0, lambda: _update_progress_status(completed_scans, total_urls))
+                
+                # Finalize scan
+                def _finalize():
+                    try:
+                        loader_pb.stop()
+                        loader_pb.pack_forget()
+                    except Exception:
+                        pass
+                    
+                    if dfr.LINK_SUMMARIES:
+                        loader_label.configure(text="Scan complete. Select folders and click Start.")
+                        start_sel_btn.configure(state="normal", command=lambda: _start_selected(all_tasks))
+                    else:
+                        loader_label.configure(text="Scan complete. No selectable items found.")
+                        start_sel_btn.configure(state="disabled")
+                
+                self.after(0, _finalize)
+                
             except Exception as e:
-                # Log at ERROR level so it renders red in the log view
-                try:
-                    dfr.logging.getLogger().error(f"Pre-scan failed: {e}", exc_info=True)
-                except Exception:
-                    pass
+                # Handle scan failure
+                dfr.logging.getLogger().error(f"Pre-scan failed: {e}", exc_info=True)
                 def _err():
-                    try: loader_pb.stop()
-                    except Exception: pass
-                    try: loader_pb.pack_forget()
-                    except Exception: pass
+                    try:
+                        loader_pb.stop()
+                        loader_pb.pack_forget()
+                    except Exception:
+                        pass
                     loader_label.configure(text=f"Pre-scan failed: {e}")
                     start_sel_btn.configure(state="disabled")
                     self.start_btn.configure(state="normal")
                 self.after(0, _err)
-                return
             finally:
-                # Remove pre-scan handler if it was attached to avoid duplicate logs later
+                # Cleanup logging
                 try:
                     if gh is not None:
                         dfr.logging.getLogger().removeHandler(gh)
                 except Exception:
                     pass
-            def _populate():
-                try: loader_pb.stop()
-                except Exception: pass
-                try: loader_pb.pack_forget()
-                except Exception: pass
-                loader_label.configure(text="Scan complete. Select folders and click Start.")
-                # Clear previous rows
-                for w in rows_container.winfo_children(): w.destroy()
-                # Fill rows
-                for s in dfr.LINK_SUMMARIES:
-                    rn = s.get("root_name")
-                    var = tk.BooleanVar(value=True)
-                    vars_by_root[rn] = var
-                    row = ttk.Frame(rows_container); row.pack(fill="x", pady=1)
-                    ttk.Checkbutton(row, variable=var, width=6).grid(row=0, column=0, sticky="w")
-                    # Truncate folder name if too long
-                    folder_name = rn[:28] + "..." if len(rn) > 31 else rn
-                    folder_label = ttk.Label(row, text=folder_name, width=30)
-                    folder_label.grid(row=0, column=1, sticky="w")
-                    # Add tooltip for full name if truncated
-                    if len(rn) > 31:
-                        try:
-                            # Simple tooltip: show full name on hover
-                            def on_enter(event, full_name=rn):
-                                folder_label.configure(text=full_name)
-                            def on_leave(event, short_name=folder_name):
-                                folder_label.configure(text=short_name)
-                            folder_label.bind("<Enter>", on_enter)
-                            folder_label.bind("<Leave>", on_leave)
-                        except Exception:
-                            pass
-                    ttk.Label(row, text=f"{s.get('images')} (have {s.get('images_existing')})", width=14).grid(row=0, column=2, sticky="w")
-                    img_bytes = _hb(s.get('images_bytes') or 0)
-                    ttk.Label(row, text=img_bytes, width=10).grid(row=0, column=3, sticky="w")
-                    ttk.Label(row, text=f"{s.get('videos')} (have {s.get('videos_existing')})", width=14).grid(row=0, column=4, sticky="w")
-                    vid_bytes = _hb(s.get('videos_bytes') or 0)
-                    ttk.Label(row, text=vid_bytes, width=10).grid(row=0, column=5, sticky="w")
-                # If nothing to select, reflect that in the UI
-                if not dfr.LINK_SUMMARIES:
-                    loader_label.configure(text="Scan complete. No selectable items found.")
-                # After populating, ensure window is wide enough for all columns
-                try:
-                    sel_win.update_idletasks()
-                    # Calculate required width more accurately
-                    needed_w = max(inner.winfo_reqwidth(), rows_container.winfo_reqwidth())
-                    # Account for scrollbar, padding, and safety margin
-                    sb_w = 25  # scrollbar
-                    padding_w = 50  # frame padding + margins
-                    safety_w = 30  # extra safety margin
-                    target_w = needed_w + sb_w + padding_w + safety_w
-                    
-                    cur_w = sel_win.winfo_width()
-                    screen_w = sel_win.winfo_screenwidth()
-                    max_w = max(1000, screen_w - 100)  # Leave screen margin but ensure minimum
-                    
-                    # Always use at least the target width, bounded by screen
-                    new_w = min(max(target_w, 1100), max_w)  # Ensure minimum 1100px
-                    if new_w != cur_w:
-                        sel_win.geometry(f"{new_w}x{sel_win.winfo_height()}")
-                except Exception:
-                    pass
-                # Enable start
-                start_sel_btn.configure(state="normal", command=lambda: _start_selected(tasks))
-            self.after(0, _populate)
-        threading.Thread(target=_prescan, daemon=True).start()
+        
+        # Update cancel function to stop parallel scans
+        def _cancel_sel_new():
+            scan_cancelled.set()
+            try:
+                loader_pb.stop()
+            except Exception:
+                pass
+            self.start_btn.configure(state="normal")
+            sel_win.destroy()
+        
+        # Replace the cancel command
+        btns.winfo_children()[-1].configure(command=_cancel_sel_new)
+        
+        # Start parallel pre-scan
+        threading.Thread(target=_prescan_parallel, daemon=True).start()
 
     def start_converter(self):
         local_dir = self.conv_dir_var.get().strip()
