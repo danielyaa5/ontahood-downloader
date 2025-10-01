@@ -61,9 +61,9 @@ I18N = {
         "videos_check": "Download videos (full size)",
         "btn_start": "Start",
         "log": "Log:",
-        "images": "Images:",
-        "videos": "Videos:",
-        "missing_urls_title": "Missing URLs",
+    "images": "Images:",
+    "videos": "Videos:",
+    "data": "Data:",
         "missing_urls_msg": "Paste at least one folder URL.",
         "missing_out_title": "Missing output folder",
         "missing_out_msg": "Choose an output folder.",
@@ -113,9 +113,9 @@ I18N = {
         "videos_check": "Unduh video (ukuran penuh)",
         "btn_start": "Mulai",
         "log": "Log:",
-        "images": "Gambar:",
-        "videos": "Video:",
-        "missing_urls_title": "URL kosong",
+    "images": "Gambar:",
+    "videos": "Video:",
+    "data": "Data:",
         "missing_urls_msg": "Tempel minimal satu tautan folder.",
         "missing_out_title": "Folder keluaran kosong",
         "missing_out_msg": "Pilih folder keluaran.",
@@ -380,12 +380,17 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                     log.put(msg)
                     if "[Progress]" in msg:
                         # Update images/videos progress if we can parse counts
+                        # Backend now reports: images done_total/expected_total | videos done_total/expected_total
+                        # where done_total includes both newly downloaded + already existing files
                         mi = re.findall(r"(\d+)/(\d+)", msg)
                         if mi:
-                            # Try first pair for images, second for videos if present
+                            # Parse progress for images, videos, and data files
                             app_ref.update_progress_images(int(mi[0][0]), int(mi[0][1]))
                             if len(mi) > 1:
                                 app_ref.update_progress_videos(int(mi[1][0]), int(mi[1][1]))
+                            if len(mi) > 2:
+                                # Third pair is for data files (if any)
+                                app_ref.update_progress_data(int(mi[2][0]), int(mi[2][1]))
                     if msg.startswith("[Bytes] "):
                         try:
                             bw = int(msg.split()[1])
@@ -682,11 +687,20 @@ class App(tk.Tk):
         self.progress_videos.pack(side="left", padx=(8,8))
         self.progress_videos_value = ttk.Label(vid_frame, text="0/0"); self.progress_videos_value.pack(side="left")
 
-        data_frame = ttk.Frame(prow); data_frame.pack(fill="x")
-        ttk.Label(data_frame, text="Data:").pack(side="left")
-        self.progress_bytes = ttk.Progressbar(data_frame, length=520, mode="determinate")
+        # Data files progress (PDFs, documents, etc.)
+        data_frame = ttk.Frame(prow); data_frame.pack(fill="x", pady=(0,6))
+        self.data_label = ttk.Label(data_frame, text="Data:")
+        self.data_label.pack(side="left")
+        self.progress_data = ttk.Progressbar(data_frame, length=520, mode="determinate")
+        self.progress_data.pack(side="left", padx=(8,8))
+        self.progress_data_value = ttk.Label(data_frame, text="0/0"); self.progress_data_value.pack(side="left")
+        
+        # Data transfer (bytes) progress
+        bytes_frame = ttk.Frame(prow); bytes_frame.pack(fill="x")
+        ttk.Label(bytes_frame, text="Transfer:").pack(side="left")
+        self.progress_bytes = ttk.Progressbar(bytes_frame, length=520, mode="determinate")
         self.progress_bytes.pack(side="left", padx=(8,8))
-        self.progress_bytes_value = ttk.Label(data_frame, text="0 / 0"); self.progress_bytes_value.pack(side="left")
+        self.progress_bytes_value = ttk.Label(bytes_frame, text="0 / 0"); self.progress_bytes_value.pack(side="left")
         self.expected_bytes_total = 0
         self.bytes_written = 0
 
@@ -907,37 +921,55 @@ class App(tk.Tk):
             pass
 
     def _on_close(self):
-        # Attempt graceful shutdown: stop log drain, save prefs, destroy UI, and ensure process exit
+        # Attempt graceful shutdown: signal threads to stop, wait briefly, save prefs, then exit
         try:
+            # Signal backend to stop immediately
+            setattr(dfr, "INTERRUPTED", True)
+            
+            # Stop periodic log drain callbacks to avoid lingering after the window is gone
+            if hasattr(self, "log_handler") and self.log_handler:
+                self.log_handler.stop()
+                
+            # Give threads a brief moment to see the interrupt signal and clean up
+            # This reduces the chance of partial files or hanging processes
             try:
-                # Signal backend to stop
-                setattr(dfr, "INTERRUPTED", True)
+                import time
+                time.sleep(0.5)  # 500ms should be enough for most cleanup
             except Exception:
                 pass
+                
+            # Clean up any incomplete download targets
             try:
-                # Stop periodic log drain callbacks to avoid lingering after the window is gone
-                if hasattr(self, "log_handler") and self.log_handler:
-                    self.log_handler.stop()
+                dfr.cleanup_incomplete_targets()
             except Exception:
                 pass
+                
+            # Save preferences
             try:
                 self._save_prefs()
             except Exception:
                 pass
+                
+            # Flush and close logging to avoid hangs on interpreter shutdown
             try:
-                # Flush and close logging to avoid hangs on interpreter shutdown
                 dfr.logging.shutdown()
             except Exception:
                 pass
+                
+        except Exception:
+            pass
         finally:
+            # Force exit - don't wait for lingering threads
             try:
                 self.quit()
             except Exception:
                 pass
             try:
                 self.destroy()
+            except Exception:
+                pass
             finally:
-                # Last-resort hard exit in case Tk hangs
+                # Last-resort hard exit
                 try:
                     os._exit(0)
                 except Exception:
@@ -963,6 +995,7 @@ class App(tk.Tk):
         self.log_title.configure(text=T(self.lang, "log"))
         self.images_label.configure(text=T(self.lang, "images"))
         self.videos_label.configure(text=T(self.lang, "videos"))
+        self.data_label.configure(text=T(self.lang, "data"))
         # Converter labels
         self.conv_title.configure(text=T(self.lang, "conv_title"))
         self.conv_subtitle.configure(text=T(self.lang, "conv_subtitle"))
@@ -1125,7 +1158,7 @@ class App(tk.Tk):
             self.expected_bytes_total = exp_bytes
             # Start worker
             sel_win.destroy()
-            self.update_progress_images(0,0); self.update_progress_videos(0,0)
+            self.update_progress_images(0,0); self.update_progress_videos(0,0); self.update_progress_data(0,0)
             t = threading.Thread(
                 target=run_worker,
                 args=(urls, outdir, self.log_handler, self.start_btn, width, self.videos_var.get(), img_original, self, self.lang),
@@ -1488,7 +1521,7 @@ class App(tk.Tk):
         local_dir = self.conv_dir_var.get().strip()
         if not local_dir:
             messagebox.showerror(T(self.lang, "missing_conv_dir_title"), T(self.lang, "missing_conv_dir_msg")); return
-        self.update_progress_images(0,0)  # Converter mainly affects images
+        self.update_progress_images(0,0); self.update_progress_videos(0,0); self.update_progress_data(0,0)  # Reset all progress bars
         t = threading.Thread(
             target=run_converter,
             args=(local_dir, self.log_handler, self.conv_start_btn, self, self.lang),
@@ -1510,6 +1543,14 @@ class App(tk.Tk):
         self.progress_videos["maximum"] = total if total else 1
         self.progress_videos["value"] = done
         self.progress_videos_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
+        self.update_idletasks()
+
+    def update_progress_data(self, done, total):
+        total = max(total, 0)
+        done = min(max(done,0), total) if total else 0
+        self.progress_data["maximum"] = total if total else 1
+        self.progress_data["value"] = done
+        self.progress_data_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
         self.update_idletasks()
 
     def update_progress_bytes(self, bytes_written):

@@ -89,6 +89,9 @@ class Counters:
     videos_done: int = 0
     videos_skipped: int = 0
     videos_failed: int = 0
+    data_done: int = 0
+    data_skipped: int = 0
+    data_failed: int = 0
     bytes_written: int = 0
 
 @dataclass
@@ -105,19 +108,23 @@ START_TS = time.time()
 INTERRUPTED = False
 EXPECTED_IMAGES = 0
 EXPECTED_VIDEOS = 0
+EXPECTED_DATA = 0
 ALREADY_HAVE_IMAGES = 0
 ALREADY_HAVE_VIDEOS = 0
+ALREADY_HAVE_DATA = 0
 EXPECTED_TOTAL_BYTES = 0
 
 # -------------------- Logging --------------------
 
 def reset_counters():
-    global TOTALS, EXPECTED_IMAGES, EXPECTED_VIDEOS, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, START_TS, INTERRUPTED, LINK_SUMMARIES, FAILED_ITEMS
+    global TOTALS, EXPECTED_IMAGES, EXPECTED_VIDEOS, EXPECTED_DATA, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, ALREADY_HAVE_DATA, START_TS, INTERRUPTED, LINK_SUMMARIES, FAILED_ITEMS
     TOTALS = Totals()
     EXPECTED_IMAGES = 0
     EXPECTED_VIDEOS = 0
+    EXPECTED_DATA = 0
     ALREADY_HAVE_IMAGES = 0
     ALREADY_HAVE_VIDEOS = 0
+    ALREADY_HAVE_DATA = 0
     global EXPECTED_TOTAL_BYTES
     EXPECTED_TOTAL_BYTES = 0
     START_TS = time.time()
@@ -325,6 +332,13 @@ def classify_media(mime: str, name: str, file_ext: Optional[str]) -> Optional[st
     ext = _ext_from(name, file_ext)
     if (mime or "").startswith("image/") or ext in _IMAGE_EXTS: return "image"
     if (mime or "").startswith("video/") or ext in _VIDEO_EXTS: return "video"
+    # Classify as "data" for documents and other files (PDFs, docs, spreadsheets, etc.)
+    # This gives users visibility into non-media file downloads
+    mime_lower = (mime or "").lower()
+    if (mime_lower.startswith("application/") or 
+        mime_lower.startswith("text/") or 
+        ext in {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "zip", "rar", "7z"}):
+        return "data"
     return None
 
 def gapi_execute_with_retry(req, retries: int = 8):
@@ -622,7 +636,8 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
             logging.info(L(f"= exists (image): {target}", f"= sudah ada (gambar): {target}"))
             with _LOCK:
                 TOTALS.grand.images_skipped += 1; folder_ctrs.images_skipped += 1
-            return False
+            # Return True for existing files so they count as "completed" for progress purposes
+            return True
         if DOWNLOAD_IMAGES_ORIGINAL:
             logging.info(L(f"Downloading image original -> {target}",
                            f"Mengunduh gambar ukuran asli -> {target}"))
@@ -655,10 +670,14 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
             logging.info(L(f"= exists (video): {target}", f"= sudah ada (video): {target}"))
             with _LOCK:
                 TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1
-            return False
+            # Return True for existing files so they count as "completed" for progress purposes
+            return True
         if not DOWNLOAD_VIDEOS:
             logging.info(L("Skipping video; option disabled.", "Lewati video (opsi nonaktif)."))
-            TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1; return False
+            with _LOCK:
+                TOTALS.grand.videos_skipped += 1; folder_ctrs.videos_skipped += 1
+            # Return False for videos that are intentionally skipped (don't count as completed)
+            return False
         logging.info(L(f"Downloading video -> {target}", f"Mengunduh video -> {target}"))
         ok = download_video_resumable(service, creds, fid, target) if ROBUST_RESUME else _download_video_simple(service, fid, target)
         if ok:
@@ -678,8 +697,49 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
             pass
         return False
 
+    elif media_kind == "data":
+        # Handle data files (PDFs, documents, etc.)
+        base, ext = os.path.splitext(name)
+        if not ext:
+            # Try to determine extension from mime type or file extension metadata
+            if "pdf" in mime.lower():
+                ext = ".pdf"
+            elif "text" in mime.lower():
+                ext = ".txt"
+            elif file_ext:
+                ext = f".{file_ext}"
+            else:
+                ext = ".dat"  # generic data extension
+        target = os.path.join(out_subdir, f"{base}__{fid}{ext}")
+        
+        if not OVERWRITE and os.path.exists(target):
+            logging.info(L(f"= exists (data): {target}", f"= sudah ada (data): {target}"))
+            with _LOCK:
+                TOTALS.grand.data_skipped += 1; folder_ctrs.data_skipped += 1
+            # Return True for existing files so they count as "completed" for progress purposes
+            return True
+            
+        logging.info(L(f"Downloading data file -> {target}", f"Mengunduh file data -> {target}"))
+        ok = download_file_resumable(service, creds, fid, target, label=L("Data", "Data"))
+        if ok:
+            with _LOCK:
+                TOTALS.grand.data_done += 1; folder_ctrs.data_done += 1
+            return True
+        # failed
+        with _LOCK:
+            TOTALS.grand.data_failed += 1; folder_ctrs.data_failed += 1
+        try:
+            with _LOCK:
+                FAILED_ITEMS.append({
+                "id": fid, "name": name, "kind": "data", "__root_name": counters_key,
+                "__folder_out": out_subdir, "target": target
+            })
+        except Exception:
+            pass
+        return False
+
     else:
-        logging.debug(L(f"- skip non-media: {name} [{mime}]", f"- lewati (bukan media): {name} [{mime}]")); return False
+        logging.debug(L(f"- skip unclassified: {name} [{mime}]", f"- lewati (tidak terklasifikasi): {name} [{mime}]")); return False
 
 # -------------------- Summaries --------------------
 
@@ -705,21 +765,37 @@ def print_grand_summary():
     ))
 
 def print_progress():
-    total_images = EXPECTED_IMAGES; total_videos = EXPECTED_VIDEOS
+    total_images = EXPECTED_IMAGES; total_videos = EXPECTED_VIDEOS; total_data = EXPECTED_DATA
+    # Include both newly downloaded AND already existing files in the "done" count
+    # This gives users accurate progress including files they already had
     done_images = ALREADY_HAVE_IMAGES + TOTALS.grand.images_done
     done_videos = ALREADY_HAVE_VIDEOS + TOTALS.grand.videos_done
+    done_data = ALREADY_HAVE_DATA + TOTALS.grand.data_done
     remaining_images = max(0, total_images - done_images)
     remaining_videos = max(0, total_videos - done_videos)
-    logging.info(L(
-        f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
-        f"videos {done_videos}/{total_videos} (left {remaining_videos})",
-        f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
-        f"video {done_videos}/{total_videos} (sisa {remaining_videos})"
-    ))
+    remaining_data = max(0, total_data - done_data)
+    
+    # Include data in progress report if any data files are expected
+    if total_data > 0:
+        logging.info(L(
+            f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
+            f"videos {done_videos}/{total_videos} (left {remaining_videos}) | "
+            f"data {done_data}/{total_data} (left {remaining_data})",
+            f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
+            f"video {done_videos}/{total_videos} (sisa {remaining_videos}) | "
+            f"data {done_data}/{total_data} (sisa {remaining_data})"
+        ))
+    else:
+        logging.info(L(
+            f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
+            f"videos {done_videos}/{total_videos} (left {remaining_videos})",
+            f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
+            f"video {done_videos}/{total_videos} (sisa {remaining_videos})"
+        ))
 
 # -------------------- Pre-scan --------------------
 def prescan_tasks(service) -> List[Dict]:
-    global EXPECTED_IMAGES, EXPECTED_VIDEOS, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, LINK_SUMMARIES
+    global EXPECTED_IMAGES, EXPECTED_VIDEOS, EXPECTED_DATA, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, ALREADY_HAVE_DATA, LINK_SUMMARIES
     LINK_SUMMARIES = []
 
     urls = list(FOLDER_URLS)
@@ -727,7 +803,7 @@ def prescan_tasks(service) -> List[Dict]:
 
     def _scan_one(url: str):
         # Modify shared counters from within this worker
-        global EXPECTED_IMAGES, EXPECTED_VIDEOS, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, EXPECTED_TOTAL_BYTES
+        global EXPECTED_IMAGES, EXPECTED_VIDEOS, EXPECTED_DATA, ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, ALREADY_HAVE_DATA, EXPECTED_TOTAL_BYTES
         local_tasks: List[Dict] = []
         if INTERRUPTED:
             return local_tasks
@@ -748,14 +824,15 @@ def prescan_tasks(service) -> List[Dict]:
                 f"# Pra-pindai: {root_name} ({url}) -> induk {url_label}"
             ))
 
-            link_images = 0; link_videos = 0; link_images_existing = 0; link_videos_existing = 0
-            link_images_bytes = 0; link_videos_bytes = 0
+            link_images = 0; link_videos = 0; link_data = 0
+            link_images_existing = 0; link_videos_existing = 0; link_data_existing = 0
+            link_images_bytes = 0; link_videos_bytes = 0; link_data_bytes = 0
 
             for f in list_folder_recursive(svc, folder_id, rel_path=""):
                 if INTERRUPTED: break
                 fid  = f.get("id"); mime = f.get("mimeType",""); fext = f.get("fileExtension")
                 kind = classify_media(mime, f.get("name",""), fext)
-                if kind in ("image","video"):
+                if kind in ("image", "video", "data"):
                     f["__root_name"] = root_name
                     f["__folder_out"] = folder_out
                     rel = f.get("__rel_path","")
@@ -803,7 +880,39 @@ def prescan_tasks(service) -> List[Dict]:
                                     link_images_bytes += estimated_thumb_size
                                 except Exception:
                                     pass
-                    else:
+                    elif kind == "data":
+                        link_data += 1
+                        with _LOCK:
+                            EXPECTED_DATA += 1
+                        base, ext = os.path.splitext(f.get("name", "file"))
+                        if not ext:
+                            if "pdf" in mime.lower():
+                                ext = ".pdf"
+                            elif "text" in mime.lower():
+                                ext = ".txt"
+                            elif fext:
+                                ext = f".{fext}"
+                            else:
+                                ext = ".dat"
+                        data_target = os.path.join(target_dir, f"{base}__{fid}{ext}")
+                        if os.path.exists(data_target):
+                            with _LOCK:
+                                ALREADY_HAVE_DATA += 1
+                            link_data_existing += 1
+                        else:
+                            local_tasks.append(f)
+                            try:
+                                sz = int(f.get("size") or 0)
+                                if not sz:
+                                    meta = get_item(svc, fid, "size")
+                                    sz = int(meta.get("size") or 0)
+                                link_data_bytes += sz
+                            except Exception as e:
+                                logging.debug(L(
+                                    f"Could not get size for data file {fid}: {e}",
+                                    f"Tidak bisa mendapatkan ukuran untuk file data {fid}: {e}"
+                                ))
+                    else:  # video
                         link_videos += 1
                         with _LOCK:
                             EXPECTED_VIDEOS += 1
@@ -832,10 +941,19 @@ def prescan_tasks(service) -> List[Dict]:
             logging.error(L(f"Listing failed for URL {url}: {e}", f"Listing gagal untuk URL {url}: {e}"))
             return local_tasks
 
-        logging.info(L(
-            f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | videos={link_videos} (have {link_videos_existing})",
-            f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | video={link_videos} (sudah {link_videos_existing})"
-        ))
+        # Log summary with data files if any are found
+        if link_data > 0:
+            logging.info(L(
+                f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | "
+                f"videos={link_videos} (have {link_videos_existing}) | data={link_data} (have {link_data_existing})",
+                f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | "
+                f"video={link_videos} (sudah {link_videos_existing}) | data={link_data} (sudah {link_data_existing})"
+            ))
+        else:
+            logging.info(L(
+                f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | videos={link_videos} (have {link_videos_existing})",
+                f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | video={link_videos} (sudah {link_videos_existing})"
+            ))
         with _LOCK:
             LINK_SUMMARIES.append({
                 "root_name": root_name,
@@ -845,9 +963,12 @@ def prescan_tasks(service) -> List[Dict]:
                 "videos": link_videos,
                 "videos_existing": link_videos_existing,
                 "videos_bytes": link_videos_bytes,
+                "data": link_data,
+                "data_existing": link_data_existing,
+                "data_bytes": link_data_bytes,
                 "url": url,
             })
-            EXPECTED_TOTAL_BYTES += (link_images_bytes + link_videos_bytes)
+            EXPECTED_TOTAL_BYTES += (link_images_bytes + link_videos_bytes + link_data_bytes)
         print_folder_summary(root_name, link_images, link_images_existing, link_videos, link_videos_existing)
         return local_tasks
 
@@ -865,10 +986,19 @@ def prescan_tasks(service) -> List[Dict]:
             except Exception as e:
                 logging.error(L(f"Prescan worker error: {e}", f"Kesalahan prescan: {e}"))
 
-    logging.info(L(
-        f"[Pre-Scan Summary] images={EXPECTED_IMAGES} (have {ALREADY_HAVE_IMAGES}) | videos={EXPECTED_VIDEOS} (have {ALREADY_HAVE_VIDEOS})",
-        f"[Ringkasan Pra-Pindai] gambar={EXPECTED_IMAGES} (sudah {ALREADY_HAVE_IMAGES}) | video={EXPECTED_VIDEOS} (sudah {ALREADY_HAVE_VIDEOS})"
-    ))
+    # Log final pre-scan summary with data files if any found
+    if EXPECTED_DATA > 0:
+        logging.info(L(
+            f"[Pre-Scan Summary] images={EXPECTED_IMAGES} (have {ALREADY_HAVE_IMAGES}) | "
+            f"videos={EXPECTED_VIDEOS} (have {ALREADY_HAVE_VIDEOS}) | data={EXPECTED_DATA} (have {ALREADY_HAVE_DATA})",
+            f"[Ringkasan Pra-Pindai] gambar={EXPECTED_IMAGES} (sudah {ALREADY_HAVE_IMAGES}) | "
+            f"video={EXPECTED_VIDEOS} (sudah {ALREADY_HAVE_VIDEOS}) | data={EXPECTED_DATA} (sudah {ALREADY_HAVE_DATA})"
+        ))
+    else:
+        logging.info(L(
+            f"[Pre-Scan Summary] images={EXPECTED_IMAGES} (have {ALREADY_HAVE_IMAGES}) | videos={EXPECTED_VIDEOS} (have {ALREADY_HAVE_VIDEOS})",
+            f"[Ringkasan Pra-Pindai] gambar={EXPECTED_IMAGES} (sudah {ALREADY_HAVE_IMAGES}) | video={EXPECTED_VIDEOS} (sudah {ALREADY_HAVE_VIDEOS})"
+        ))
     return tasks_all
 
 # -------------------- Simple (non-resumable) video --------------------
@@ -998,18 +1128,22 @@ def main():
         tasks = DIRECT_TASKS
         EXPECTED_IMAGES = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "image")
         EXPECTED_VIDEOS = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "video")
+        EXPECTED_DATA = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "data")
         logging.info(L(f"Using direct task list: {len(tasks)} items", f"Memakai daftar tugas langsung: {len(tasks)} item"))
     else:
         tasks = prescan_tasks(service)
 
-    # Split tasks into images and videos so we can parallelize images and run videos sequentially
+    # Split tasks into images, videos, and data files for organized processing
     image_tasks: List[Dict] = []
     video_tasks: List[Dict] = []
+    data_tasks: List[Dict] = []
     for f in tasks:
         kind = classify_media(f.get("mimeType",""), f.get("name",""), f.get("fileExtension"))
         if kind == "video":
             video_tasks.append(f)
-        else:
+        elif kind == "data":
+            data_tasks.append(f)
+        else:  # images and unknown types default to image processing
             image_tasks.append(f)
 
     # Images: execute with concurrency
@@ -1042,6 +1176,26 @@ def main():
                 print_progress()
         except Exception as e:
             logging.error(L(f"Worker error: {e}", f"Kesalahan pekerja: {e}"))
+
+    # Data files: execute with moderate concurrency (between images and videos)
+    if data_tasks:
+        data_futures = []
+        with ThreadPoolExecutor(max_workers=max(1, min(2, int(CONCURRENCY) // 2) if str(CONCURRENCY).isdigit() else 1)) as ex:
+            for f in data_tasks:
+                if INTERRUPTED:
+                    break
+                wait_if_paused()
+                data_futures.append(ex.submit(process_file, service, creds, f, f['__folder_out'], f['__root_name']))
+            for fut in as_completed(data_futures):
+                if INTERRUPTED:
+                    break
+                wait_if_paused()
+                try:
+                    ok = fut.result()
+                    if ok:
+                        print_progress()
+                except Exception as e:
+                    logging.error(L(f"Data worker error: {e}", f"Kesalahan pekerja data: {e}"))
 
     # If interrupted or finished, ensure any incomplete targets are removed
     cleanup_incomplete_targets()
