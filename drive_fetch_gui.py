@@ -211,19 +211,6 @@ class TkLogHandler:
         self.widget.tag_config("bracket", font=self.bold_font)
         self.widget.tag_config("counter", font=self.bold_font)
 
-    def stop(self):
-        # Cancel scheduled after-callback and mark stopped
-        try:
-            self._stopped = True
-        except Exception:
-            pass
-        try:
-            if getattr(self, "_after_id", None):
-                self.widget.after_cancel(self._after_id)
-                self._after_id = None
-        except Exception:
-            pass
-
         # Update follow state whenever the user scrolls (mouse wheel, keys, dragging)
         for ev in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>",  # Windows/macOS, Linux
                    "<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>",            # scrollbar drag
@@ -239,6 +226,19 @@ class TkLogHandler:
             self._after_id = self.widget.after(100, self._drain)
         except Exception:
             self._after_id = None
+
+    def stop(self):
+        # Cancel scheduled after-callback and mark stopped
+        try:
+            self._stopped = True
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_after_id", None):
+                self.widget.after_cancel(self._after_id)
+                self._after_id = None
+        except Exception:
+            pass
 
     def _insert_styled(self, line: str):
         # Insert one line with styled timestamp, level, and emphasized tags/counters
@@ -660,6 +660,8 @@ class App(tk.Tk):
         self.log_title.pack(anchor="w", padx=12)
         self.logs = scrolledtext.ScrolledText(self, height=16, state="disabled"); self.logs.pack(fill="both", expand=True, padx=12, pady=(0,10))
         self.log_handler = TkLogHandler(self.logs)
+        # Test log message to verify logging works
+        self.log_handler.put(f"2025-10-01 05:15:00 | INFO    | [GUI] Application started - logging system active")
 
         prow = ttk.Frame(self); prow.pack(fill="x", padx=12, pady=(0,12))
         img_frame = ttk.Frame(prow); img_frame.pack(fill="x", pady=(0,6))
