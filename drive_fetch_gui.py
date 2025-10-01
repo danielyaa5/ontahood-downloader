@@ -1261,6 +1261,30 @@ class App(tk.Tk):
                                 
                             if os.path.exists(img_target):
                                 link_images_existing += 1
+                                # Also estimate size for existing files to show total folder size
+                                if img_original:
+                                    try:
+                                        # Try to get actual file size from local file first
+                                        local_size = os.path.getsize(img_target)
+                                        link_images_bytes += local_size
+                                    except Exception:
+                                        # Fallback to Drive API or estimate
+                                        try:
+                                            sz = int(f.get("size") or 0)
+                                            if not sz:
+                                                meta = dfr.get_item(svc, fid, "size")
+                                                sz = int(meta.get("size") or 0)
+                                            link_images_bytes += sz
+                                        except Exception:
+                                            # Final fallback: estimate based on original image size
+                                            link_images_bytes += 2 * 1024 * 1024  # 2MB estimate
+                                else:
+                                    # For thumbnails, check local file size or estimate
+                                    try:
+                                        local_size = os.path.getsize(img_target)
+                                        link_images_bytes += local_size
+                                    except Exception:
+                                        link_images_bytes += 100 * 1024  # 100KB estimate
                             else:
                                 local_tasks.append(f)
                                 if img_original:
@@ -1271,7 +1295,7 @@ class App(tk.Tk):
                                             sz = int(meta.get("size") or 0)
                                         link_images_bytes += sz
                                     except Exception:
-                                        pass
+                                        link_images_bytes += 2 * 1024 * 1024  # 2MB estimate
                                 else:
                                     # Estimate thumbnail size
                                     link_images_bytes += 100 * 1024  # 100KB estimate
@@ -1282,6 +1306,21 @@ class App(tk.Tk):
                             
                             if os.path.exists(vid_target):
                                 link_videos_existing += 1
+                                # Include size for existing videos
+                                try:
+                                    local_size = os.path.getsize(vid_target)
+                                    link_videos_bytes += local_size
+                                except Exception:
+                                    # Fallback to Drive API or estimate
+                                    try:
+                                        sz = int(f.get("size") or 0)
+                                        if not sz:
+                                            meta = dfr.get_item(svc, fid, "size")
+                                            sz = int(meta.get("size") or 0)
+                                        link_videos_bytes += sz
+                                    except Exception:
+                                        # Estimate video size (much larger than images)
+                                        link_videos_bytes += 50 * 1024 * 1024  # 50MB estimate
                             else:
                                 if self.videos_var.get():
                                     local_tasks.append(f)
@@ -1292,7 +1331,7 @@ class App(tk.Tk):
                                             sz = int(meta.get("size") or 0)
                                         link_videos_bytes += sz
                                     except Exception:
-                                        pass
+                                        link_videos_bytes += 50 * 1024 * 1024  # 50MB estimate
                 
                 # Create summary for this folder
                 summary = {
