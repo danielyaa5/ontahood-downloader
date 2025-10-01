@@ -1059,19 +1059,18 @@ class App(tk.Tk):
         sel_win = tk.Toplevel(self)
         sel_win.title("Pre-scan Preview")
         sel_win.grab_set()
-        # Initial geometry: wide enough to fit columns by default (bounded by screen width)
-        try:
-            main_w = int(self.winfo_width()) if int(self.winfo_width() or 0) > 0 else 980
-        except Exception:
-            main_w = 980
+        # Initial geometry: wide enough to fit all columns properly
         try:
             screen_w = sel_win.winfo_screenwidth()
         except Exception:
             screen_w = 1440
-        init_w = min(max(900, main_w), max(600, screen_w - 80))
+        # Calculate minimum width needed for all columns (8+34+16+12+16+12 = 98 chars * ~8px + padding)
+        min_needed_w = 1100  # Conservative estimate for all columns
+        max_w = max(800, screen_w - 100)  # Leave some screen margin
+        init_w = min(min_needed_w, max_w)
         try:
             sel_win.geometry(f"{init_w}x520")
-            sel_win.minsize(800, 360)
+            sel_win.minsize(1000, 360)  # Ensure minimum width shows all columns
         except Exception:
             pass
         frm = ttk.Frame(sel_win); frm.pack(fill="both", expand=True, padx=12, pady=12)
@@ -1096,14 +1095,14 @@ class App(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         sbar.pack(side="right", fill="y")
 
-        # Header row (columns)
+        # Header row (columns) - adjusted widths for better fit
         header = ttk.Frame(inner); header.pack(fill="x", pady=(0,4))
-        ttk.Label(header, text="Include", width=8).grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="Folder", width=34).grid(row=0, column=1, sticky="w")
-        ttk.Label(header, text="Images (have)", width=16).grid(row=0, column=2, sticky="w")
-        ttk.Label(header, text="Img Size", width=12).grid(row=0, column=3, sticky="w")
-        ttk.Label(header, text="Videos (have)", width=16).grid(row=0, column=4, sticky="w")
-        ttk.Label(header, text="Vid Size", width=12).grid(row=0, column=5, sticky="w")
+        ttk.Label(header, text="✓", width=6).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Folder", width=30).grid(row=0, column=1, sticky="w")
+        ttk.Label(header, text="Images (have)", width=14).grid(row=0, column=2, sticky="w")
+        ttk.Label(header, text="Img Size", width=10).grid(row=0, column=3, sticky="w")
+        ttk.Label(header, text="Videos (have)", width=14).grid(row=0, column=4, sticky="w")
+        ttk.Label(header, text="Vid Size", width=10).grid(row=0, column=5, sticky="w")
 
         rows_container = ttk.Frame(inner); rows_container.pack(fill="x")
         vars_by_root = {}
@@ -1228,30 +1227,50 @@ class App(tk.Tk):
                     var = tk.BooleanVar(value=True)
                     vars_by_root[rn] = var
                     row = ttk.Frame(rows_container); row.pack(fill="x", pady=1)
-                    ttk.Checkbutton(row, variable=var, width=8).grid(row=0, column=0, sticky="w")
-                    ttk.Label(row, text=rn, width=34).grid(row=0, column=1, sticky="w")
-                    ttk.Label(row, text=f"{s.get('images')} (have {s.get('images_existing')})", width=16).grid(row=0, column=2, sticky="w")
+                    ttk.Checkbutton(row, variable=var, width=6).grid(row=0, column=0, sticky="w")
+                    # Truncate folder name if too long
+                    folder_name = rn[:28] + "..." if len(rn) > 31 else rn
+                    folder_label = ttk.Label(row, text=folder_name, width=30)
+                    folder_label.grid(row=0, column=1, sticky="w")
+                    # Add tooltip for full name if truncated
+                    if len(rn) > 31:
+                        try:
+                            # Simple tooltip: show full name on hover
+                            def on_enter(event, full_name=rn):
+                                folder_label.configure(text=full_name)
+                            def on_leave(event, short_name=folder_name):
+                                folder_label.configure(text=short_name)
+                            folder_label.bind("<Enter>", on_enter)
+                            folder_label.bind("<Leave>", on_leave)
+                        except Exception:
+                            pass
+                    ttk.Label(row, text=f"{s.get('images')} (have {s.get('images_existing')})", width=14).grid(row=0, column=2, sticky="w")
                     img_bytes = _hb(s.get('images_bytes') or 0)
-                    ttk.Label(row, text=img_bytes, width=12).grid(row=0, column=3, sticky="w")
-                    ttk.Label(row, text=f"{s.get('videos')} (have {s.get('videos_existing')})", width=16).grid(row=0, column=4, sticky="w")
+                    ttk.Label(row, text=img_bytes, width=10).grid(row=0, column=3, sticky="w")
+                    ttk.Label(row, text=f"{s.get('videos')} (have {s.get('videos_existing')})", width=14).grid(row=0, column=4, sticky="w")
                     vid_bytes = _hb(s.get('videos_bytes') or 0)
-                    ttk.Label(row, text=vid_bytes, width=12).grid(row=0, column=5, sticky="w")
+                    ttk.Label(row, text=vid_bytes, width=10).grid(row=0, column=5, sticky="w")
                 # If nothing to select, reflect that in the UI
                 if not dfr.LINK_SUMMARIES:
                     loader_label.configure(text="Scan complete. No selectable items found.")
-                # After populating, auto-expand width to fit columns (bounded by screen width)
+                # After populating, ensure window is wide enough for all columns
                 try:
                     sel_win.update_idletasks()
+                    # Calculate required width more accurately
                     needed_w = max(inner.winfo_reqwidth(), rows_container.winfo_reqwidth())
-                    # account for scrollbar + paddings/margins
-                    sb_w = 20
-                    extra = 40
-                    target_w = needed_w + sb_w + extra
+                    # Account for scrollbar, padding, and safety margin
+                    sb_w = 25  # scrollbar
+                    padding_w = 50  # frame padding + margins
+                    safety_w = 30  # extra safety margin
+                    target_w = needed_w + sb_w + padding_w + safety_w
+                    
                     cur_w = sel_win.winfo_width()
                     screen_w = sel_win.winfo_screenwidth()
-                    max_w = max(600, screen_w - 80)
-                    new_w = min(max(cur_w, target_w), max_w)
-                    if new_w > cur_w:
+                    max_w = max(1000, screen_w - 100)  # Leave screen margin but ensure minimum
+                    
+                    # Always use at least the target width, bounded by screen
+                    new_w = min(max(target_w, 1100), max_w)  # Ensure minimum 1100px
+                    if new_w != cur_w:
                         sel_win.geometry(f"{new_w}x{sel_win.winfo_height()}")
                 except Exception:
                     pass
