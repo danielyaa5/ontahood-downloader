@@ -391,11 +391,13 @@ def wait_if_paused():
         _t.sleep(0.2)
 
 
-def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterator[Dict]:
+def list_folder_recursive(service, folder_id: str, rel_path: str = "", external_cancel_check=None) -> Iterator[Dict]:
     """
     Yield file dicts for all media items under folder_id, descending into subfolders.
     Shortcut files are normalized to look like real files using shortcutDetails so that
     counting and downloading work without extra API calls.
+    
+    external_cancel_check: Optional callable that returns True if operation should be cancelled
     """
     fields = (
             "nextPageToken, "
@@ -406,7 +408,7 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
     page_token = None
 
     while True:
-        if INTERRUPTED:
+        if INTERRUPTED or (external_cancel_check and external_cancel_check()):
             return
         wait_if_paused()
         req = service.files().list(
@@ -423,7 +425,7 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
 
         wait_if_paused()
         for item in resp.get("files", []):
-            if INTERRUPTED:
+            if INTERRUPTED or (external_cancel_check and external_cancel_check()):
                 return
             wait_if_paused()
             mime = item.get("mimeType", "")
@@ -432,7 +434,7 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
                 sub_rel  = os.path.join(rel_path, sub_name) if rel_path else sub_name
                 logging.debug(L(f"Descending into subfolder: {sub_name} -> {sub_rel}",
                                 f"Masuk subfolder: {sub_name} -> {sub_rel}"))
-                yield from list_folder_recursive(service, item.get("id"), sub_rel)
+                yield from list_folder_recursive(service, item.get("id"), sub_rel, external_cancel_check)
 
             elif mime == "application/vnd.google-apps.shortcut":
                 sd = item.get("shortcutDetails") or {}
@@ -445,7 +447,7 @@ def list_folder_recursive(service, folder_id: str, rel_path: str = "") -> Iterat
                     sub_rel  = os.path.join(rel_path, sub_name) if rel_path else sub_name
                     logging.debug(L(f"Following folder shortcut: {sub_name} -> {target_id}",
                                     f"Mengikuti shortcut folder: {sub_name} -> {target_id}"))
-                    yield from list_folder_recursive(service, target_id, sub_rel)
+                    yield from list_folder_recursive(service, target_id, sub_rel, external_cancel_check)
                 else:
                     # Normalize file-shortcuts into "real file" dicts so counting/downloading just works.
                     norm = {
