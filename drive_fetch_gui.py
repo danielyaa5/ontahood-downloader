@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # drive_fetch_gui.py — Simple Tkinter GUI (bilingual EN/ID)
-# v0.14 — 2025-09-30
+# v0.15 — 2025-10-01
 # - Keeps original thumbnail/video downloader at top
 # - Adds separate section to convert local thumbnail folders to ORIGINAL images
 #   (select a folder of your chosen thumbnails and it will add full-size images into the same folder)
+# - Log view now only auto-scrolls if the user is at the bottom
 
 import os
-import threading, queue, traceback, sys, re
+import threading, queue, traceback, sys, re, json, signal
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import font as tkfont
 
 # Optional imports (help the freezer detect deps if you bundle them)
 try:
@@ -36,6 +38,12 @@ DEFAULT_URLS = [
 ]
 CONVERT_THUMBS_DIR = None  # path to a local folder of thumbnails for conversion
 
+# Preferences file (persist GUI state between runs)
+try:
+    GUI_PREFS_FILE = (Path(dfr.SUPPORT_DIR) / "gui_prefs.json")
+except Exception:
+    GUI_PREFS_FILE = Path.home() / ".ontahood_gui_prefs.json"
+
 # ----------------- i18n -----------------
 
 I18N = {
@@ -49,7 +57,7 @@ I18N = {
         "output_label": "Output folder:",
         "choose": "Choose…",
         "mode_label": "Image mode (thumbnail width / ORIGINAL):",
-        "mode_hint": "ORIGINAL = full-size download; numbers = local thumbnails.",
+        "mode_hint": "ORIGINAL = full-size download; XXXpx = reduced image size (MUCH smaller file size).",
         "videos_check": "Download videos (full size)",
         "btn_start": "Start",
         "log": "Log:",
@@ -169,25 +177,158 @@ def locate_credentials():
 # ----------------- Logging bridge -----------------
 
 class TkLogHandler:
+    """
+    Log → Tkinter ScrolledText bridge that only auto-scrolls when the user is at the bottom.
+    If the user scrolls up, it stops following until they scroll back down.
+
+    Enhancements:
+    - Colorize only timestamp and level.
+    - Emphasize bracket tags like [Progress]/[Count] and counters like 10/20 or key=123.
+    """
     def __init__(self, widget: scrolledtext.ScrolledText):
         self.widget = widget
         self.queue = queue.Queue()
-        self.widget.after(100, self._drain)
+        self._follow_tail = True  # auto-scroll enabled iff user is at bottom
+
+        # Fonts and tags for styling
+        try:
+            base_font = tkfont.nametofont(self.widget.cget("font"))
+        except Exception:
+            base_font = tkfont.nametofont("TkFixedFont")
+        self.bold_font = base_font.copy()
+        try:
+            self.bold_font.configure(weight="bold")
+        except Exception:
+            pass
+
+        # Colors roughly match terminal formatter
+        self.widget.tag_config("ts", foreground="#7f8c8d")
+        self.widget.tag_config("level-DEBUG", foreground="#00acc1")
+        self.widget.tag_config("level-INFO", foreground="#2ecc71")
+        self.widget.tag_config("level-WARNING", foreground="#f39c12")
+        self.widget.tag_config("level-ERROR", foreground="#e74c3c")
+        self.widget.tag_config("level-CRITICAL", foreground="#ffffff", background="#c0392b")
+        self.widget.tag_config("bracket", font=self.bold_font)
+        self.widget.tag_config("counter", font=self.bold_font)
+
+    def stop(self):
+        # Cancel scheduled after-callback and mark stopped
+        try:
+            self._stopped = True
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_after_id", None):
+                self.widget.after_cancel(self._after_id)
+                self._after_id = None
+        except Exception:
+            pass
+
+        # Update follow state whenever the user scrolls (mouse wheel, keys, dragging)
+        for ev in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>",  # Windows/macOS, Linux
+                   "<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>",            # scrollbar drag
+                   "<Key-Up>", "<Key-Down>", "<Prior>", "<Next>", "<Home>", "<End>"):  # PageUp/PageDown
+            self.widget.bind(ev, self._on_user_scroll, add="+")
+
+        # Limit retained lines to avoid memory growth
+        self.max_lines = 10000
+
+        # Periodically drain log queue (store id so we can cancel on exit)
+        self._after_id = None
+        try:
+            self._after_id = self.widget.after(100, self._drain)
+        except Exception:
+            self._after_id = None
+
+    def _insert_styled(self, line: str):
+        # Insert one line with styled timestamp, level, and emphasized tags/counters
+        import re as _re
+        s = line.rstrip("\n")
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| ([A-Z]+)\s+\| (.*)$", s)
+        if not m:
+            # Fallback: plain insert
+            self.widget.insert("end", line)
+            return
+        ts, level, msg = m.groups()
+        # Timestamp
+        self.widget.insert("end", ts, ("ts",))
+        self.widget.insert("end", " | ")
+        # Level (colorized)
+        level_tag = f"level-{level}"
+        self.widget.insert("end", level, (level_tag,))
+        self.widget.insert("end", " | ")
+        # Message with emphasis on [brackets] and selective counters only
+        # Avoid bolding dates like "2025/5" by only bolding N/N after 'images|videos|gambar|video',
+        # and numbers after 'left|sisa', plus key=value pairs.
+        pat = _re.compile(r"(\[[^\]]+\])|(\b(?:images|videos|gambar|video)\s\d+/\d+\b)|(\b(?:left|sisa)\s\d+\b)|(\b[A-Za-z_]+=\d+\b)")
+        idx = 0
+        for m2 in pat.finditer(msg):
+            if m2.start() > idx:
+                self.widget.insert("end", msg[idx:m2.start()])
+            chunk = m2.group(0)
+            if m2.group(1):
+                self.widget.insert("end", chunk, ("bracket",))
+            else:
+                self.widget.insert("end", chunk, ("counter",))
+            idx = m2.end()
+        if idx < len(msg):
+            self.widget.insert("end", msg[idx:])
+        self.widget.insert("end", "\n")
+
+    def _near_bottom(self, eps: float = 0.001) -> bool:
+        """Return True if the visible bottom is at (or very near) the end."""
+        try:
+            first, last = self.widget.yview()
+            return (1.0 - last) <= eps
+        except Exception:
+            return True
+
+    def _on_user_scroll(self, _evt=None):
+        # After Tk processes the scroll/drag, recompute follow state
+        self.widget.after_idle(self._update_follow_state)
+
+    def _update_follow_state(self):
+        self._follow_tail = self._near_bottom()
+
     def put(self, line: str):
         if not line.endswith("\n"):
             line += "\n"
         self.queue.put(line)
+
     def _drain(self):
+        # If stopped (during app exit), do not continue scheduling
+        if getattr(self, "_stopped", False):
+            return
         try:
             while True:
                 line = self.queue.get_nowait()
+                # Check if we were at the bottom *before* inserting
+                was_at_bottom = self._near_bottom()
+
                 self.widget.configure(state="normal")
-                self.widget.insert("end", line)
+                self._insert_styled(line)
+                # Trim lines if over limit
+                try:
+                    end_idx = self.widget.index("end-1c")
+                    total_lines = int(end_idx.split(".")[0])
+                    if total_lines > self.max_lines:
+                        cut = total_lines - self.max_lines
+                        self.widget.delete("1.0", f"{cut}.0")
+                except Exception:
+                    pass
                 self.widget.configure(state="disabled")
-                self.widget.see("end")
+
+                # Only jump to end if the user was already at the bottom (or follow is on)
+                if self._follow_tail and was_at_bottom:
+                    self.widget.see("end")
         except queue.Empty:
             pass
-        self.widget.after(100, self._drain)
+        # Keep running
+        try:
+            if not getattr(self, "_stopped", False):
+                self._after_id = self.widget.after(100, self._drain)
+        except Exception:
+            pass
 
 # ----------------- Workers -----------------
 
@@ -195,21 +336,31 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                preview_width: int, download_videos: bool, img_original: bool, app_ref, lang: str):
     btn.configure(state="disabled")
     try:
+        try:
+            app_ref.cancel_btn.configure(state="normal")
+        except Exception:
+            pass
         out_root = Path(outdir); out_root.mkdir(parents=True, exist_ok=True)
 
         if img_original:
-            log.put(T(lang, "log_img_mode_original"))
+            msg = T(lang, "log_img_mode_original")
+            log.put(msg); print(msg)
         else:
-            log.put(T(lang, "log_img_mode_thumb", w=preview_width))
-        log.put(T(lang, "log_vids", state=T(lang, "log_vids_on" if download_videos else "log_vids_off")))
-        log.put(T(lang, "log_processing", n=len(urls)))
+            msg = T(lang, "log_img_mode_thumb", w=preview_width)
+            log.put(msg); print(msg)
+        msg = T(lang, "log_vids", state=T(lang, "log_vids_on" if download_videos else "log_vids_off"))
+        log.put(msg); print(msg)
+        msg = T(lang, "log_processing", n=len(urls))
+        log.put(msg); print(msg)
 
         cred_path = locate_credentials()
         if cred_path:
             dfr.CREDENTIALS_FILE = str(cred_path)
-            log.put(T(lang, "log_creds_found", path=cred_path))
+            msg = T(lang, "log_creds_found", path=cred_path)
+            log.put(msg); print(msg)
         else:
-            log.put(T(lang, "log_creds_missing"))
+            msg = T(lang, "log_creds_missing")
+            log.put(msg); print(msg)
 
         # Pass options to backend
         dfr.FOLDER_URLS = urls
@@ -233,22 +384,69 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                             app_ref.update_progress_images(int(mi[0][0]), int(mi[0][1]))
                             if len(mi) > 1:
                                 app_ref.update_progress_videos(int(mi[1][0]), int(mi[1][1]))
+                    if msg.startswith("[Bytes] "):
+                        try:
+                            bw = int(msg.split()[1])
+                            app_ref.update_progress_bytes(bw)
+                        except Exception:
+                            pass
+                    # Update account label for both EN and ID log lines, or any line with <email>
+                    m = re.search(r"(Using account:|Menggunakan akun:)\s*(.*?)\s*<([^>]+)>", msg)
+                    if m:
+                        app_ref.set_account(m.group(2).strip(), m.group(3).strip())
+                    else:
+                        m2 = re.search(r"<([^>]+)>", msg)
+                        if m2:
+                            app_ref.set_account("", m2.group(1).strip())
                 except Exception:
                     pass
 
-        root_logger = dfr.logging.getLogger()
-        for h in list(root_logger.handlers):
-            root_logger.removeHandler(h)
-        dfr.setup_logging()
+        # Set backend log language and attach GUI log handler. Let backend configure console/file handlers.
+        setattr(dfr, "LANG", lang)  # "en" or "id" from the GUI
         fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
         gh = _GuiHandler(); gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO)); gh.setFormatter(fmt)
         dfr.logging.getLogger().addHandler(gh)
 
         dfr.main()
+        # Post-run summary
+        try:
+            snap = dfr.get_totals_snapshot()
+            summ = (
+                f"Elapsed: {snap.get('elapsed')}\n"
+                f"Scanned: {snap.get('scanned')}\n"
+                f"Images: done={snap['images']['done']} skip={snap['images']['skipped']} fail={snap['images']['failed']} "
+                f"(expected {snap['images']['expected']}, already {snap['images']['already']})\n"
+                f"Videos: done={snap['videos']['done']} skip={snap['videos']['skipped']} fail={snap['videos']['failed']} "
+                f"(expected {snap['videos']['expected']}, already {snap['videos']['already']})\n"
+                f"Bytes written: {dfr.human_bytes(snap.get('bytes_written', 0))}"
+            )
+            messagebox.showinfo("Summary", summ)
+        except Exception:
+            pass
         log.put("\n" + T(lang, "done"))
+        try:
+            notify("Ontahood Downloader", "Completed successfully")
+        except Exception:
+            pass
     except Exception:
-        log.put("\n" + T(lang, "fatal") + "\n" + traceback.format_exc())
+        # Emit an ERROR-level log so it renders in red, and include traceback in the GUI log
+        try:
+            dfr.logging.getLogger().error(T(lang, "fatal"), exc_info=True)
+        except Exception:
+            pass
+        try:
+            log.put("\n" + T(lang, "fatal") + "\n" + traceback.format_exc())
+        except Exception:
+            pass
+        try:
+            notify("Ontahood Downloader", "Error: see log")
+        except Exception:
+            pass
     finally:
+        try:
+            app_ref.cancel_btn.configure(state="disabled")
+        except Exception:
+            pass
         btn.configure(state="normal")
 
 def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref, lang: str):
@@ -257,12 +455,18 @@ def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref
     """
     btn.configure(state="disabled")
     try:
+        try:
+            app_ref.cancel_btn.configure(state="normal")
+        except Exception:
+            pass
         if not local_folder or not os.path.isdir(local_folder):
             messagebox.showerror(T(lang, "missing_conv_dir_title"), T(lang, "missing_conv_dir_msg"))
             return
 
-        log.put(T(lang, "log_conv_using", path=local_folder))
-        log.put(T(lang, "log_conv_start"))
+        msg = T(lang, "log_conv_using", path=local_folder)
+        log.put(msg); print(msg)
+        msg = T(lang, "log_conv_start")
+        log.put(msg); print(msg)
 
         cred_path = locate_credentials()
         if cred_path:
@@ -289,22 +493,56 @@ def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref
                 except Exception:
                     pass
 
-        root_logger = dfr.logging.getLogger()
-        for h in list(root_logger.handlers):
-            root_logger.removeHandler(h)
-        dfr.setup_logging()
+        # Set backend log language and attach GUI log handler. Let backend configure console/file handlers.
+        setattr(dfr, "LANG", lang)  # "en" or "id" from the GUI
         fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
         gh = _GuiHandler(); gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO)); gh.setFormatter(fmt)
         dfr.logging.getLogger().addHandler(gh)
 
         dfr.main()
         log.put("\n" + T(lang, "done"))
+        try:
+            notify("Ontahood Downloader", "Converter completed")
+        except Exception:
+            pass
     except Exception:
-        log.put("\n" + T(lang, "fatal") + "\n" + traceback.format_exc())
+        text = "\n" + T(lang, "fatal") + "\n" + traceback.format_exc()
+        log.put(text)
+        try:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            notify("Ontahood Downloader", "Converter error: see log")
+        except Exception:
+            pass
     finally:
         # Reset converter flag so future thumbnail runs aren't intercepted
         setattr(dfr, "CONVERT_THUMBS_DIR", "")
+        try:
+            app_ref.cancel_btn.configure(state="disabled")
+        except Exception:
+            pass
         btn.configure(state="normal")
+
+# ----------------- Notifications -----------------
+
+def notify(title: str, message: str):
+    try:
+        if sys.platform == "darwin":
+            # Use AppleScript notification
+            esc_title = title.replace("\"", "\\\"")
+            esc_msg = message.replace("\"", "\\\"")
+            os.system(f"osascript -e \"display notification \"\"{esc_msg}\"\" with title \"\"{esc_title}\"\"\"")
+        elif sys.platform.startswith("win"):
+            # Best-effort toast via powershell
+            pass
+        else:
+            # Linux: try notify-send if available
+            os.system(f"notify-send '{title}' '{message}' 2>/dev/null || true")
+    except Exception:
+        pass
 
 # ----------------- App -----------------
 
@@ -323,11 +561,13 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
+        self._loading_prefs = True
+        self._geom_save_job = None
         self.lang = "en"  # default language
         self.title(T(self.lang, "app_title"))
         self.geometry("980x950"); self.minsize(820, 760)
 
-        # Language switcher
+        # Language switcher & account area
         topbar = ttk.Frame(self); topbar.pack(fill="x", padx=12, pady=(10, 0))
         ttk.Label(topbar, text=T(self.lang, "language")).pack(side="left")
         self.lang_var = tk.StringVar(value=T(self.lang, "lang_en"))
@@ -337,6 +577,13 @@ class App(tk.Tk):
         )
         self.lang_box.pack(side="left", padx=(8, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self._on_lang_change)
+
+        # Account indicator and auth button (Sign in / Sign out)
+        self.acct_var = tk.StringVar(value="Account: (not signed in)")
+        self.acct_label = ttk.Label(topbar, textvariable=self.acct_var)
+        self.acct_label.pack(side="right")
+        self.auth_btn = ttk.Button(topbar, text="Sign in", command=self.sign_in)
+        self.auth_btn.pack(side="right", padx=(0,8))
 
         # Intro / instructions (Downloader section)
         self.hdr = ttk.Label(self, wraplength=940, justify="left")
@@ -356,6 +603,8 @@ class App(tk.Tk):
         self.out_entry.pack(side="left", fill="x", expand=True, padx=8)
         self.choose_btn = ttk.Button(row, command=self.pick_out)
         self.choose_btn.pack(side="left")
+        self.open_btn = ttk.Button(row, text="Open", command=self.open_outdir)
+        self.open_btn.pack(side="left", padx=(6,0))
 
         psz = ttk.Frame(self); psz.pack(fill="x", padx=12)
         self.mode_label = ttk.Label(psz)
@@ -371,7 +620,18 @@ class App(tk.Tk):
         self.videos_check.pack(side="left")
 
         btnrow = ttk.Frame(self); btnrow.pack(fill="x", padx=12, pady=(2,10))
-        self.start_btn = ttk.Button(btnrow, command=self.start); self.start_btn.pack(side="right")
+        self.start_btn = ttk.Button(btnrow, command=self.start)
+        self.start_btn.pack(side="right")
+        # Cancel control (enabled only while processing)
+        self.cancel_btn = ttk.Button(btnrow, text="Cancel", command=self.cancel, state="disabled")
+        self.cancel_btn.pack(side="left")
+
+        # Advanced: concurrency control
+        adv = ttk.Frame(self); adv.pack(fill="x", padx=12, pady=(0,6))
+        ttk.Label(adv, text="Parallel downloads:").pack(side="left")
+        self.concurrent_var = tk.IntVar(value=3)
+        self.concurrent_spin = tk.Spinbox(adv, from_=1, to=8, textvariable=self.concurrent_var, width=4)
+        self.concurrent_spin.pack(side="left", padx=(6,0))
 
         # --- CONVERTER (below) ---
         sep = ttk.Separator(self, orient="horizontal"); sep.pack(fill="x", padx=12, pady=(6, 8))
@@ -409,15 +669,273 @@ class App(tk.Tk):
         self.progress_images.pack(side="left", padx=(8,8))
         self.progress_images_value = ttk.Label(img_frame, text="0/0"); self.progress_images_value.pack(side="left")
 
-        vid_frame = ttk.Frame(prow); vid_frame.pack(fill="x")
+        vid_frame = ttk.Frame(prow); vid_frame.pack(fill="x", pady=(0,6))
         self.videos_label = ttk.Label(vid_frame)
         self.videos_label.pack(side="left")
         self.progress_videos = ttk.Progressbar(vid_frame, length=520, mode="determinate")
         self.progress_videos.pack(side="left", padx=(8,8))
         self.progress_videos_value = ttk.Label(vid_frame, text="0/0"); self.progress_videos_value.pack(side="left")
 
+        data_frame = ttk.Frame(prow); data_frame.pack(fill="x")
+        ttk.Label(data_frame, text="Data:").pack(side="left")
+        self.progress_bytes = ttk.Progressbar(data_frame, length=520, mode="determinate")
+        self.progress_bytes.pack(side="left", padx=(8,8))
+        self.progress_bytes_value = ttk.Label(data_frame, text="0 / 0"); self.progress_bytes_value.pack(side="left")
+        self.expected_bytes_total = 0
+        self.bytes_written = 0
+
+        # Load saved preferences before applying language and states
+        try:
+            self._load_prefs()
+        except Exception:
+            pass
+
+        # Apply saved auth state to button/label
+        try:
+            threading.Thread(target=self._check_account_async, daemon=True).start()
+        except Exception:
+            pass
+
         # Apply initial language
         self.apply_i18n()
+
+        # Persist on close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Kick off a non-blocking account check (no OAuth popups) to update the label if token is valid
+        try:
+            threading.Thread(target=self._check_account_async, daemon=True).start()
+        except Exception:
+            pass
+
+        # Autosave on changes
+        try:
+            self.outvar.trace_add('write', self._on_var_changed)
+            self.sizevar.trace_add('write', self._on_var_changed)
+            self.videos_var.trace_add('write', self._on_var_changed)
+            self.conv_dir_var.trace_add('write', self._on_var_changed)
+            # concurrency
+            self.concurrent_var.trace_add('write', self._on_var_changed)
+        except Exception:
+            pass
+        try:
+            self.urlbox.bind('<<Modified>>', self._on_urlbox_modified)
+            self.urlbox.edit_modified(False)
+        except Exception:
+            pass
+        # Debounced geometry save
+        self.bind('<Configure>', self._on_configure)
+        # Save on Start/Converter buttons too (handled in handlers)
+
+        # Save on SIGINT/SIGTERM (e.g., Ctrl+C)
+        self._install_signal_handlers()
+
+        # Done loading
+        self._loading_prefs = False
+
+    # ----- preferences (load/save) -----
+
+    def _maybe_save_prefs(self):
+        if not getattr(self, "_loading_prefs", False):
+            try:
+                self._save_prefs()
+            except Exception:
+                pass
+
+    def _on_var_changed(self, *args):
+        self._maybe_save_prefs()
+
+    def _on_urlbox_modified(self, _evt=None):
+        try:
+            self.urlbox.edit_modified(False)
+        except Exception:
+            pass
+        self._maybe_save_prefs()
+
+    def _on_configure(self, _evt=None):
+        if getattr(self, "_loading_prefs", False):
+            return
+        if self._geom_save_job:
+            try:
+                self.after_cancel(self._geom_save_job)
+            except Exception:
+                pass
+        self._geom_save_job = self.after(1000, self._maybe_save_prefs)
+
+    def _check_account_async(self):
+        try:
+            info = dfr.try_get_account_info(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+            self.after(0, lambda i=info: self.update_auth_ui(i))
+        except Exception:
+            pass
+
+    def _install_signal_handlers(self):
+        def _sig_terminate(_s, _f):
+            try:
+                # Schedule graceful cancel + save + exit on Tk loop
+                def _do_exit():
+                    try:
+                        self.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        setattr(dfr, "INTERRUPTED", True)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, "log_handler") and self.log_handler:
+                            self.log_handler.stop()
+                    except Exception:
+                        pass
+                    try:
+                        self._save_prefs()
+                    except Exception:
+                        pass
+                    try:
+                        dfr.logging.shutdown()
+                    except Exception:
+                        pass
+                    try:
+                        self.quit()
+                    except Exception:
+                        pass
+                    try:
+                        self.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        os._exit(0)
+                    except Exception:
+                        pass
+                self.after(0, _do_exit)
+            except Exception:
+                try:
+                    os._exit(0)
+                except Exception:
+                    pass
+        try:
+            signal.signal(signal.SIGINT, _sig_terminate)
+        except Exception:
+            pass
+        try:
+            signal.signal(signal.SIGTERM, _sig_terminate)
+        except Exception:
+            pass
+
+    def _load_prefs(self):
+        try:
+            if not GUI_PREFS_FILE.exists():
+                return
+            with open(GUI_PREFS_FILE, "r", encoding="utf-8") as f:
+                pref = json.load(f)
+        except Exception:
+            return
+        # Language first so labels use saved language
+        lang = pref.get("lang")
+        if lang in ("en", "id"):
+            self.lang = lang
+            # Set selector display (will be corrected by apply_i18n)
+            self.lang_var.set(T(self.lang, "lang_en") if self.lang == "en" else T("id", "lang_id"))
+
+        # URLs
+        urls_text = pref.get("urls_text")
+        if isinstance(urls_text, str) and urls_text.strip():
+            self.urlbox.delete("1.0", "end")
+            # Ensure trailing newline for consistency
+            if not urls_text.endswith("\n"):
+                urls_text = urls_text + "\n"
+            self.urlbox.insert("1.0", urls_text)
+
+        # Output directory
+        outdir = pref.get("outdir")
+        if isinstance(outdir, str):
+            self.outvar.set(outdir)
+
+        # Size selection
+        size_sel = pref.get("size_selection")
+        if isinstance(size_sel, str) and size_sel in self.SIZE_OPTIONS:
+            self.sizevar.set(size_sel)
+
+        # Videos checkbox
+        vids = pref.get("download_videos")
+        if isinstance(vids, bool):
+            self.videos_var.set(vids)
+
+        # Concurrency
+        conc = pref.get("concurrency")
+        try:
+            if conc:
+                self.concurrent_var.set(int(conc))
+        except Exception:
+            pass
+
+        # Converter directory
+        conv_dir = pref.get("converter_dir")
+        if isinstance(conv_dir, str):
+            self.conv_dir_var.set(conv_dir)
+
+        # Window geometry
+        geom = pref.get("geometry")
+        if isinstance(geom, str) and geom:
+            try:
+                self.geometry(geom)
+            except Exception:
+                pass
+
+    def _save_prefs(self):
+        try:
+            GUI_PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "lang": self.lang,
+                "urls_text": self.urlbox.get("1.0", "end").strip(),
+                "outdir": self.outvar.get().strip(),
+                "size_selection": self.sizevar.get().strip(),
+                "download_videos": bool(self.videos_var.get()),
+                "converter_dir": self.conv_dir_var.get().strip(),
+                "concurrency": int(self.concurrent_var.get()),
+                "geometry": self.geometry(),
+            }
+            with open(GUI_PREFS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        # Attempt graceful shutdown: stop log drain, save prefs, destroy UI, and ensure process exit
+        try:
+            try:
+                # Signal backend to stop
+                setattr(dfr, "INTERRUPTED", True)
+            except Exception:
+                pass
+            try:
+                # Stop periodic log drain callbacks to avoid lingering after the window is gone
+                if hasattr(self, "log_handler") and self.log_handler:
+                    self.log_handler.stop()
+            except Exception:
+                pass
+            try:
+                self._save_prefs()
+            except Exception:
+                pass
+            try:
+                # Flush and close logging to avoid hangs on interpreter shutdown
+                dfr.logging.shutdown()
+            except Exception:
+                pass
+        finally:
+            try:
+                self.quit()
+            except Exception:
+                pass
+            try:
+                self.destroy()
+            finally:
+                # Last-resort hard exit in case Tk hangs
+                try:
+                    os._exit(0)
+                except Exception:
+                    pass
 
     # ----- i18n helpers -----
 
@@ -465,12 +983,40 @@ class App(tk.Tk):
         d = filedialog.askdirectory()
         if d: self.outvar.set(d)
 
+    def open_outdir(self):
+        p = self.outvar.get().strip()
+        if not p:
+            return
+        try:
+            if sys.platform == "darwin":
+                os.system(f"open '{p.replace("'", "'\\''")}'")
+            elif sys.platform.startswith("win"):
+                os.startfile(p)  # type: ignore[attr-defined]
+            else:
+                os.system(f"xdg-open '{p.replace("'", "'\\''")}'")
+        except Exception:
+            pass
+
     def pick_conv_dir(self):
         d = filedialog.askdirectory()
         if d: self.conv_dir_var.set(d)
 
     def start(self):
         urls = [u.strip() for u in self.urlbox.get("1.0","end").splitlines() if u.strip()]
+        # Normalize & deduplicate by Drive folder ID to avoid duplicates with different query params
+        id_to_url = {}
+        bad_urls = []
+        for u in urls:
+            try:
+                fid = dfr.extract_folder_id(u)
+            except Exception:
+                fid = ""
+            if not fid:
+                bad_urls.append(u)
+                continue
+            if fid not in id_to_url:
+                id_to_url[fid] = u
+        urls = list(id_to_url.values())
         if not urls:
             messagebox.showerror(T(self.lang, "missing_urls_title"), T(self.lang, "missing_urls_msg")); return
         outdir = self.outvar.get().strip()
@@ -481,13 +1027,238 @@ class App(tk.Tk):
         if not img_original and not (100 <= width <= 6000):
             messagebox.showerror(T(self.lang, "invalid_size_title"), T(self.lang, "invalid_size_msg")); return
 
-        self.update_progress_images(0,0); self.update_progress_videos(0,0)
-        t = threading.Thread(
-            target=run_worker,
-            args=(urls, outdir, self.log_handler, self.start_btn, width, self.videos_var.get(), img_original, self, self.lang),
-            daemon=True
-        )
-        t.start()
+        # Save current prefs when starting
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
+        # Reset control flags
+        try:
+            setattr(dfr, "PAUSE", False)
+            setattr(dfr, "INTERRUPTED", False)
+        except Exception:
+            pass
+
+        # Set concurrency
+        try:
+            setattr(dfr, "CONCURRENCY", int(self.concurrent_var.get()))
+        except Exception:
+            pass
+
+        # Kick off pre-scan with a preview dialog that opens immediately with a loader
+        self.start_btn.configure(state="disabled")
+
+        # Helper for human-readable bytes
+        def _hb(n):
+            units = ["B","KB","MB","GB","TB"]; f = float(max(0, int(n))); i = 0
+            while f >= 1024 and i < len(units)-1:
+                f /= 1024.0; i += 1
+            return f"{f:.2f} {units[i]}"
+
+        # Build preview window immediately
+        sel_win = tk.Toplevel(self)
+        sel_win.title("Pre-scan Preview")
+        sel_win.grab_set()
+        # Initial geometry: wide enough to fit columns by default (bounded by screen width)
+        try:
+            main_w = int(self.winfo_width()) if int(self.winfo_width() or 0) > 0 else 980
+        except Exception:
+            main_w = 980
+        try:
+            screen_w = sel_win.winfo_screenwidth()
+        except Exception:
+            screen_w = 1440
+        init_w = min(max(900, main_w), max(600, screen_w - 80))
+        try:
+            sel_win.geometry(f"{init_w}x520")
+            sel_win.minsize(800, 360)
+        except Exception:
+            pass
+        frm = ttk.Frame(sel_win); frm.pack(fill="both", expand=True, padx=12, pady=12)
+        ttk.Label(frm, text="Select folders to include:").pack(anchor="w")
+
+        # Loader area at bottom
+        loader_frame = ttk.Frame(frm); loader_frame.pack(fill="x", side="bottom", pady=(8,0))
+        loader_label = ttk.Label(loader_frame, text="Scanning…")
+        loader_label.pack(side="left")
+        loader_pb = ttk.Progressbar(loader_frame, mode="indeterminate", length=200)
+        loader_pb.pack(side="left", padx=(8,0))
+        try: loader_pb.start(10)
+        except Exception: pass
+
+        # Scrollable area for rows; initially empty until scan completes
+        canvas = tk.Canvas(frm, height=280)
+        sbar = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0,0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sbar.pack(side="right", fill="y")
+
+        # Header row (columns)
+        header = ttk.Frame(inner); header.pack(fill="x", pady=(0,4))
+        ttk.Label(header, text="Include", width=8).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Folder", width=34).grid(row=0, column=1, sticky="w")
+        ttk.Label(header, text="Images (have)", width=16).grid(row=0, column=2, sticky="w")
+        ttk.Label(header, text="Img Size", width=12).grid(row=0, column=3, sticky="w")
+        ttk.Label(header, text="Videos (have)", width=16).grid(row=0, column=4, sticky="w")
+        ttk.Label(header, text="Vid Size", width=12).grid(row=0, column=5, sticky="w")
+
+        rows_container = ttk.Frame(inner); rows_container.pack(fill="x")
+        vars_by_root = {}
+
+        # Buttons
+        btns = ttk.Frame(frm); btns.pack(fill="x", pady=(8,0))
+        def _cancel_sel():
+            try:
+                loader_pb.stop()
+            except Exception:
+                pass
+            self.start_btn.configure(state="normal")
+            sel_win.destroy()
+        def _start_selected(tasks):
+            selected_roots = {rn for rn, v in vars_by_root.items() if v.get()}
+            if not selected_roots:
+                messagebox.showwarning("Pre-scan", "No folders selected."); return
+            selected_tasks = [t for t in tasks if t.get("__root_name") in selected_roots]
+            dfr.set_direct_tasks(selected_tasks)
+            # Expected bytes based on selection
+            exp_bytes = 0
+            for s in dfr.LINK_SUMMARIES:
+                if s.get("root_name") in selected_roots:
+                    exp_bytes += int(s.get("images_bytes") or 0) + int(s.get("videos_bytes") or 0)
+            self.expected_bytes_total = exp_bytes
+            # Start worker
+            sel_win.destroy()
+            self.update_progress_images(0,0); self.update_progress_videos(0,0)
+            t = threading.Thread(
+                target=run_worker,
+                args=(urls, outdir, self.log_handler, self.start_btn, width, self.videos_var.get(), img_original, self, self.lang),
+                daemon=True
+            )
+            t.start()
+        start_sel_btn = ttk.Button(btns, text="Start", state="disabled")
+        start_sel_btn.pack(side="right")
+        ttk.Button(btns, text="Cancel", command=_cancel_sel).pack(side="right", padx=(0,6))
+
+        # Background prescan thread
+        def _prescan():
+            # Attach GUI log handler for pre-scan so errors/info show in the log view with levels/colors
+            gh = None
+            try:
+                # Ensure log language matches UI
+                try:
+                    setattr(dfr, "LANG", self.lang)
+                except Exception:
+                    pass
+                # Ensure backend console/file logging is configured for pre-scan (without duplicating handlers later)
+                try:
+                    root_logger = dfr.logging.getLogger()
+                    if not root_logger.handlers:
+                        dfr.setup_logging()
+                except Exception:
+                    pass
+                # Bridge backend logging into Tk log view
+                logh = self.log_handler
+                class _GuiHandler(dfr.logging.Handler):
+                    def emit(self, record):
+                        try:
+                            msg = self.format(record)
+                            logh.put(msg)
+                        except Exception:
+                            pass
+                fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
+                gh = _GuiHandler(); gh.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO)); gh.setFormatter(fmt)
+                dfr.logging.getLogger().addHandler(gh)
+
+                dfr.reset_counters()
+                # Configure backend globals for prescan
+                setattr(dfr, "FOLDER_URLS", urls)
+                setattr(dfr, "OUTPUT_DIR", str(outdir))
+                setattr(dfr, "IMAGE_WIDTH", int(width))
+                setattr(dfr, "DOWNLOAD_VIDEOS", bool(self.videos_var.get()))
+                setattr(dfr, "DOWNLOAD_IMAGES_ORIGINAL", bool(img_original))
+
+                # Ensure credentials are resolved before attempting service creation
+                cred_path = locate_credentials()
+                if cred_path is None:
+                    raise RuntimeError("credentials.json not found — click Sign in or place credentials.json next to the app.")
+                try:
+                    dfr.CREDENTIALS_FILE = str(cred_path)
+                except Exception:
+                    pass
+
+                service, _creds = dfr.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+                tasks = dfr.prescan_tasks(service)
+            except Exception as e:
+                # Log at ERROR level so it renders red in the log view
+                try:
+                    dfr.logging.getLogger().error(f"Pre-scan failed: {e}", exc_info=True)
+                except Exception:
+                    pass
+                def _err():
+                    try: loader_pb.stop()
+                    except Exception: pass
+                    try: loader_pb.pack_forget()
+                    except Exception: pass
+                    loader_label.configure(text=f"Pre-scan failed: {e}")
+                    start_sel_btn.configure(state="disabled")
+                    self.start_btn.configure(state="normal")
+                self.after(0, _err)
+                return
+            finally:
+                # Remove pre-scan handler if it was attached to avoid duplicate logs later
+                try:
+                    if gh is not None:
+                        dfr.logging.getLogger().removeHandler(gh)
+                except Exception:
+                    pass
+            def _populate():
+                try: loader_pb.stop()
+                except Exception: pass
+                try: loader_pb.pack_forget()
+                except Exception: pass
+                loader_label.configure(text="Scan complete. Select folders and click Start.")
+                # Clear previous rows
+                for w in rows_container.winfo_children(): w.destroy()
+                # Fill rows
+                for s in dfr.LINK_SUMMARIES:
+                    rn = s.get("root_name")
+                    var = tk.BooleanVar(value=True)
+                    vars_by_root[rn] = var
+                    row = ttk.Frame(rows_container); row.pack(fill="x", pady=1)
+                    ttk.Checkbutton(row, variable=var, width=8).grid(row=0, column=0, sticky="w")
+                    ttk.Label(row, text=rn, width=34).grid(row=0, column=1, sticky="w")
+                    ttk.Label(row, text=f"{s.get('images')} (have {s.get('images_existing')})", width=16).grid(row=0, column=2, sticky="w")
+                    img_bytes = _hb(s.get('images_bytes') or 0)
+                    ttk.Label(row, text=img_bytes, width=12).grid(row=0, column=3, sticky="w")
+                    ttk.Label(row, text=f"{s.get('videos')} (have {s.get('videos_existing')})", width=16).grid(row=0, column=4, sticky="w")
+                    vid_bytes = _hb(s.get('videos_bytes') or 0)
+                    ttk.Label(row, text=vid_bytes, width=12).grid(row=0, column=5, sticky="w")
+                # If nothing to select, reflect that in the UI
+                if not dfr.LINK_SUMMARIES:
+                    loader_label.configure(text="Scan complete. No selectable items found.")
+                # After populating, auto-expand width to fit columns (bounded by screen width)
+                try:
+                    sel_win.update_idletasks()
+                    needed_w = max(inner.winfo_reqwidth(), rows_container.winfo_reqwidth())
+                    # account for scrollbar + paddings/margins
+                    sb_w = 20
+                    extra = 40
+                    target_w = needed_w + sb_w + extra
+                    cur_w = sel_win.winfo_width()
+                    screen_w = sel_win.winfo_screenwidth()
+                    max_w = max(600, screen_w - 80)
+                    new_w = min(max(cur_w, target_w), max_w)
+                    if new_w > cur_w:
+                        sel_win.geometry(f"{new_w}x{sel_win.winfo_height()}")
+                except Exception:
+                    pass
+                # Enable start
+                start_sel_btn.configure(state="normal", command=lambda: _start_selected(tasks))
+            self.after(0, _populate)
+        threading.Thread(target=_prescan, daemon=True).start()
 
     def start_converter(self):
         local_dir = self.conv_dir_var.get().strip()
@@ -517,5 +1288,91 @@ class App(tk.Tk):
         self.progress_videos_value.configure(text=f"{done}/{total} ({T(self.lang, 'progress_left')} {max(total-done,0)})")
         self.update_idletasks()
 
+    def update_progress_bytes(self, bytes_written):
+        self.bytes_written = max(0, int(bytes_written))
+        total = max(1, int(self.expected_bytes_total) or 1)
+        val = min(self.bytes_written, total)
+        self.progress_bytes["maximum"] = total
+        self.progress_bytes["value"] = val
+        # Format human-readable
+        def _hb(n):
+            units = ["B","KB","MB","GB","TB"]; f = float(n); i = 0
+            while f >= 1024 and i < len(units)-1:
+                f /= 1024.0; i += 1
+            return f"{f:.2f} {units[i]}"
+        self.progress_bytes_value.configure(text=f"{_hb(val)} / {_hb(total)}")
+        self.update_idletasks()
+
+    # ----- control actions -----
+
+    def cancel(self):
+        try:
+            setattr(dfr, "INTERRUPTED", True)
+        except Exception:
+            pass
+
+
+    def sign_out(self):
+        try:
+            tok = Path(dfr.TOKEN_FILE)
+            if tok.exists():
+                bak = tok.with_suffix(tok.suffix + ".bak")
+                try:
+                    if bak.exists(): bak.unlink()
+                except Exception:
+                    pass
+                tok.replace(bak)
+                messagebox.showinfo("Sign out", f"Signed out. Backup token at: {bak}")
+            else:
+                messagebox.showinfo("Sign out", "No token found. You are not signed in.")
+        except Exception as e:
+            messagebox.showerror("Sign out", f"Failed to sign out: {e}")
+        # Immediately reflect unsigned state in UI
+        self.update_auth_ui({})
+
+    def sign_in(self):
+        def _do_sign_in():
+            try:
+                # Ensure credentials path is honored; this will launch OAuth if needed
+                svc, _creds = dfr.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+                info = dfr.get_account_info(svc)
+                self.after(0, lambda i=info: self.update_auth_ui(i))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Sign in", f"Failed to sign in: {e}"))
+        try:
+            threading.Thread(target=_do_sign_in, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror("Sign in", f"Failed to start sign in: {e}")
+
+    def set_account(self, name: str, email: str):
+        disp = name or email or "(unknown)"
+        self.acct_var.set(f"Account: {disp}")
+
+    def update_auth_ui(self, info: dict | None = None):
+        try:
+            if info is None:
+                info = dfr.try_get_account_info(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+        except Exception:
+            info = {}
+        name = (info.get("name") or "").strip() if isinstance(info, dict) else ""
+        email = (info.get("email") or "").strip() if isinstance(info, dict) else ""
+        if name or email:
+            self.set_account(name, email)
+            # Show Sign out action
+            self.auth_btn.configure(text="Sign out", command=self.sign_out)
+        else:
+            self.acct_var.set("Account: (not signed in)")
+            # Show Sign in action
+            self.auth_btn.configure(text="Sign in", command=self.sign_in)
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    try:
+        App().mainloop()
+    except KeyboardInterrupt:
+        try:
+            # Best-effort graceful exit
+            # We don’t have direct app ref here, but ensure process exits
+            os._exit(0)
+        except Exception:
+            pass
