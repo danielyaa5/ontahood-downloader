@@ -18,7 +18,7 @@ from .i18n import T
 from .log_handler import TkLogHandler
 from .preferences import PreferencesManager
 from .utils import locate_credentials, validate_image_size
-from .workers import run_worker, run_converter, start_worker_thread
+from .workers import run_worker, run_converter, start_worker_thread, run_prescan
 
 
 class App(tk.Tk):
@@ -431,50 +431,78 @@ class App(tk.Tk):
             self.conv_dir_var.set(folder)
     
     def start(self):
-        """Start the main download process."""
-        # Get and validate URLs
-        urls_text = self.urlbox.get("1.0", tk.END).strip()
-        if not urls_text:
-            messagebox.showerror(T(self.lang, "missing_urls_msg"), T(self.lang, "missing_urls_msg"))
-            return
-        
-        urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
-        if not urls:
-            messagebox.showerror(T(self.lang, "missing_urls_msg"), T(self.lang, "missing_urls_msg"))
-            return
-        
-        # Validate output directory
-        outdir = self.outvar.get().strip()
-        if not outdir:
-            messagebox.showerror(T(self.lang, "missing_out_title"), T(self.lang, "missing_out_msg"))
-            return
-        
-        # Validate image size
-        size_text = self.sizevar.get()
-        is_valid, width = validate_image_size(size_text)
-        if not is_valid:
-            messagebox.showerror(T(self.lang, "invalid_size_title"), T(self.lang, "invalid_size_msg"))
-            return
-        
-        # Determine if original images requested
-        img_original = (width == -1)  # -1 indicates ORIGINAL mode
-        if not img_original:
-            width = int(width)
-        
-        # Reset progress
-        self.update_progress_images(0, 0)
-        self.update_progress_videos(0, 0)
-        
-        # Save preferences before starting
-        self._save_preferences()
-        
-        # Start worker thread
-        start_worker_thread(
-            run_worker,
-            urls, outdir, self.log_handler, self.start_btn,
-            width, self.videos_var.get(), img_original,
-            self, self.lang
-        )
+        """Start the main download process (with pre-scan preview)."""
+        try:
+            # Get and validate URLs
+            urls_text = self.urlbox.get("1.0", tk.END).strip()
+            if not urls_text:
+                messagebox.showerror(T(self.lang, "missing_urls_msg"), T(self.lang, "missing_urls_msg"))
+                return
+            
+            urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
+            if not urls:
+                messagebox.showerror(T(self.lang, "missing_urls_msg"), T(self.lang, "missing_urls_msg"))
+                return
+            
+            # Validate output directory
+            outdir = self.outvar.get().strip()
+            if not outdir:
+                messagebox.showerror(T(self.lang, "missing_out_title"), T(self.lang, "missing_out_msg"))
+                return
+            
+            # Validate image size
+            size_text = self.sizevar.get()
+            is_valid, width = validate_image_size(size_text)
+            if not is_valid:
+                messagebox.showerror(T(self.lang, "invalid_size_title"), T(self.lang, "invalid_size_msg"))
+                return
+            
+            # Determine if original images requested
+            img_original = (width == -1)  # -1 indicates ORIGINAL mode
+            if not img_original:
+                width = int(width)
+            
+            # Reset progress
+            self.update_progress_images(0, 0)
+            self.update_progress_videos(0, 0)
+            
+            # Save preferences before starting
+            self._save_preferences()
+            
+            # Add initial log message
+            self.log_handler.put("[GUI] Starting pre-scan...")
+
+            # Store context for after preview confirm
+            self._pending_start_ctx = {
+                "urls": urls,
+                "outdir": outdir,
+                "width": width,
+                "img_original": img_original,
+                "download_videos": self.videos_var.get(),
+            }
+
+            # Disable Start and enable Cancel while prescan runs
+            try:
+                self.start_btn.configure(state="disabled")
+                self.cancel_btn.configure(state="normal")
+            except Exception:
+                pass
+            
+            # Create prescan window immediately with loading state
+            self.create_prescan_window()
+            
+            # Start prescan worker thread
+            start_worker_thread(
+                run_prescan,
+                urls, outdir, self.log_handler,
+                width, self.videos_var.get(), img_original,
+                self, self.lang
+            )
+        except Exception as e:
+            import traceback
+            error_msg = f"Error starting download: {e}\n{traceback.format_exc()}"
+            self.log_handler.put(error_msg)
+            messagebox.showerror("Start Error", str(e))
     
     def start_converter(self):
         """Start the thumbnail converter process."""
@@ -582,3 +610,261 @@ class App(tk.Tk):
         """Update bytes progress (if implemented in UI)."""
         self.bytes_written = max(0, bytes_written)
         # Could add a bytes progress bar here if needed
+
+    # Pre-scan preview dialog
+    def create_prescan_window(self):
+        """Create and show prescan window immediately with loading state."""
+        try:
+            # Close any existing preview window
+            if hasattr(self, "_prescan_win") and self._prescan_win and tk.Toplevel.winfo_exists(self._prescan_win):
+                try:
+                    self._prescan_win.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self._prescan_tasks = []
+        self._prescan_totals = {"images": 0, "videos": 0, "data": 0, "have_images": 0, "have_videos": 0, "have_data": 0}
+        self._prescan_total_bytes = 0
+        self._prescan_loading_dots = 0
+
+        win = tk.Toplevel(self)
+        self._prescan_win = win
+        try:
+            win.title(T(self.lang, "prescan_title"))
+        except Exception:
+            win.title("Pre-Scan Preview")
+        win.geometry("820x520")
+        win.minsize(680, 420)
+        win.transient(self)
+        win.grab_set()
+        
+        # Handle window close (X button) same as Cancel
+        def on_window_close():
+            self._prescan_loading = False
+            try:
+                # Signal the backend to stop
+                import drive_fetch_resilient as dfr
+                dfr.INTERRUPTED = True
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            # Re-enable Start, disable Cancel
+            try:
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass
+        
+        win.protocol("WM_DELETE_WINDOW", on_window_close)
+
+        # Description
+        desc = ttk.Label(win, text=T(self.lang, "prescan_desc"), wraplength=780, justify="left")
+        desc.pack(anchor="w", padx=12, pady=(12, 6))
+
+        # Treeview for per-link counts
+        cols = ("root", "images", "videos", "data")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=12)
+        tree.heading("root", text=T(self.lang, "prescan_col_root"))
+        tree.heading("images", text=T(self.lang, "prescan_col_images"))
+        tree.heading("videos", text=T(self.lang, "prescan_col_videos"))
+        tree.heading("data", text=T(self.lang, "prescan_col_data"))
+        tree.column("root", width=320, anchor="w")
+        tree.column("images", width=140, anchor="center")
+        tree.column("videos", width=140, anchor="center")
+        tree.column("data", width=140, anchor="center")
+        tree.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        
+        self._prescan_tree = tree
+
+        # Totals line (initially empty)
+        totals_label = ttk.Label(win, text="", justify="left")
+        totals_label.pack(anchor="w", padx=12, pady=(4, 4))
+        self._prescan_totals_label = totals_label
+        
+        # Loading animation footer
+        loading_label = ttk.Label(win, text=T(self.lang, "prescan_scanning"), justify="center")
+        loading_label.pack(anchor="center", padx=12, pady=(0, 10))
+        self._prescan_loading_label = loading_label
+        self._animate_prescan_loading()
+
+        # Buttons
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+
+        def on_cancel():
+            self._prescan_loading = False  # Stop animation
+            try:
+                # Signal the backend to stop
+                import drive_fetch_resilient as dfr
+                dfr.INTERRUPTED = True
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            # Re-enable Start, disable Cancel
+            try:
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass
+
+        def on_start():
+            # If there are no tasks, inform and do nothing
+            if not self._prescan_tasks:
+                try:
+                    messagebox.showinfo(T(self.lang, "prescan_title"), T(self.lang, "prescan_none"))
+                except Exception:
+                    pass
+                on_cancel()
+                return
+            # Set direct tasks and start the main worker
+            try:
+                import drive_fetch_resilient as dfr
+                dfr.set_direct_tasks(self._prescan_tasks)
+            except Exception:
+                pass
+            try:
+                self._prescan_loading = False  # Stop animation
+                win.destroy()
+            except Exception:
+                pass
+            # Start worker thread (Start is already disabled)
+            ctx = getattr(self, "_pending_start_ctx", {})
+            start_worker_thread(
+                run_worker,
+                ctx.get("urls"), ctx.get("outdir"), self.log_handler, self.start_btn,
+                ctx.get("width"), self._pending_start_ctx.get("download_videos", True), ctx.get("img_original"),
+                self, self.lang
+            )
+
+        cancel_button = ttk.Button(btn_row, text=T(self.lang, "prescan_btn_cancel"), command=on_cancel)
+        cancel_button.pack(side="left")
+        start_button = ttk.Button(btn_row, text=T(self.lang, "prescan_btn_start"), command=on_start)
+        start_button.pack(side="right")
+        start_button.configure(state="disabled")  # Disabled until prescan completes
+        self._prescan_start_button = start_button
+        
+        self._prescan_loading = True
+    
+    def _animate_prescan_loading(self):
+        """Animate loading dots in prescan window."""
+        if not hasattr(self, "_prescan_loading") or not self._prescan_loading:
+            return
+        
+        if not hasattr(self, "_prescan_win") or not self._prescan_win or not tk.Toplevel.winfo_exists(self._prescan_win):
+            self._prescan_loading = False
+            return
+        
+        try:
+            dots = "." * (self._prescan_loading_dots % 4)
+            self._prescan_loading_label.configure(text=T(self.lang, "prescan_scanning") + dots)
+            self._prescan_loading_dots += 1
+            self.after(500, self._animate_prescan_loading)
+        except Exception:
+            self._prescan_loading = False
+    
+    def add_prescan_folder(self, summary):
+        """Add a folder to the prescan tree as it completes."""
+        if not hasattr(self, "_prescan_tree") or not self._prescan_tree:
+            return
+        
+        try:
+            root_name = summary.get("root_name") or summary.get("url") or "(link)"
+            imgs = f"{summary.get('images',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('images_existing',0)) + ")"
+            vids = f"{summary.get('videos',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('videos_existing',0)) + ")"
+            data = f"{summary.get('data',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('data_existing',0)) + ")"
+            self._prescan_tree.insert("", "end", values=(root_name, imgs, vids, data))
+            
+            # Update running totals
+            self._prescan_totals["images"] += summary.get('images', 0)
+            self._prescan_totals["videos"] += summary.get('videos', 0)
+            self._prescan_totals["data"] += summary.get('data', 0)
+            self._prescan_totals["have_images"] += summary.get('images_existing', 0)
+            self._prescan_totals["have_videos"] += summary.get('videos_existing', 0)
+            self._prescan_totals["have_data"] += summary.get('data_existing', 0)
+            
+            self._update_prescan_totals()
+        except Exception:
+            pass
+    
+    def _update_prescan_totals(self):
+        """Update the totals label in prescan window."""
+        if not hasattr(self, "_prescan_totals_label") or not self._prescan_totals_label:
+            return
+        
+        try:
+            import drive_fetch_resilient as dfr
+            bytes_text = dfr.human_bytes(int(self._prescan_total_bytes or 0))
+        except Exception:
+            bytes_text = f"{int(self._prescan_total_bytes or 0)} B"
+        
+        totals = self._prescan_totals
+        totals_text = (
+            f"{T(self.lang, 'prescan_totals')}: "
+            f"{T(self.lang,'images')}={totals.get('images',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_images',0)) + ") | "
+            f"{T(self.lang,'videos')}={totals.get('videos',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_videos',0)) + ") | "
+            f"{T(self.lang,'data')}={totals.get('data',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_data',0)) + ")\n"
+            f"{T(self.lang, 'prescan_bytes_total')}: {bytes_text}"
+        )
+        self._prescan_totals_label.configure(text=totals_text)
+    
+    def finish_prescan(self, tasks, total_bytes):
+        """Called when prescan completes. Enable the start button and hide loading."""
+        self._prescan_loading = False
+        self._prescan_tasks = list(tasks or [])
+        self._prescan_total_bytes = total_bytes
+        
+        # Check if window was closed early
+        if not hasattr(self, "_prescan_win") or not self._prescan_win:
+            # Window was closed, just re-enable the main Start button
+            try:
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass
+            return
+        
+        try:
+            # Check if window still exists
+            if not tk.Toplevel.winfo_exists(self._prescan_win):
+                # Window was closed, just re-enable the main Start button
+                try:
+                    self.start_btn.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            # Window was closed, just re-enable the main Start button
+            try:
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass
+            return
+        
+        try:
+            # Hide loading label
+            if hasattr(self, "_prescan_loading_label") and self._prescan_loading_label:
+                self._prescan_loading_label.configure(text="")
+            
+            # Update totals one final time
+            self._update_prescan_totals()
+            
+            # Enable start button
+            if hasattr(self, "_prescan_start_button") and self._prescan_start_button:
+                self._prescan_start_button.configure(state="normal")
+        except Exception:
+            # If any error, still re-enable the main Start button
+            try:
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass

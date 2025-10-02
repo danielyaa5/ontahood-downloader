@@ -16,6 +16,7 @@ import dfr.auth as dfr_auth
 import dfr.utils as dfr_utils
 import dfr.prescan as dfr_prescan
 import drive_fetch_resilient as dfr
+from dfr.logfmt import setup_logging as dfr_setup_logging
 from .i18n import T
 from .utils import locate_credentials, notify
 from .log_handler import TkLogHandler
@@ -38,6 +39,15 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
         app_ref: Reference to main app for progress updates
         lang: Language code ('en' or 'id')
     """
+    # Add immediate debug logging
+    try:
+        log.put("[DEBUG] Worker thread started")
+        log.put(f"[DEBUG] URLs: {len(urls)}")
+        log.put(f"[DEBUG] Output: {outdir}")
+        log.put(f"[DEBUG] Image width: {preview_width}")
+    except Exception as e:
+        print(f"ERROR in initial logging: {e}")
+    
     btn.configure(state="disabled")
     
     try:
@@ -89,6 +99,12 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
         dfr.DOWNLOAD_IMAGES_ORIGINAL = bool(img_original)
         dfr.CONVERT_THUMBS_DIR = ""  # make sure converter mode is off
         
+        # Ensure backend logging outputs to console/file before adding GUI handler
+        try:
+            dfr_setup_logging()
+        except Exception:
+            pass
+
         # Set up GUI logging handler
         class _GuiHandler(dfr.logging.Handler):
             def emit(self, record):
@@ -232,6 +248,12 @@ def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref
         dfr.DOWNLOAD_IMAGES_ORIGINAL = True
         dfr.DOWNLOAD_VIDEOS = False  # not needed for conversion
         
+        # Ensure backend logging outputs to console/file before adding GUI handler
+        try:
+            dfr_setup_logging()
+        except Exception:
+            pass
+
         # Set up GUI logging handler
         class _GuiHandler(dfr.logging.Handler):
             def emit(self, record):
@@ -288,6 +310,170 @@ def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref
         except Exception:
             pass
         btn.configure(state="normal")
+
+
+def run_prescan(urls, outdir, log: TkLogHandler,
+               preview_width: int, download_videos: bool, img_original: bool,
+               app_ref, lang: str):
+    """
+    Perform a pre-scan of the provided URLs and show a preview dialog in the GUI.
+
+    This runs quickly compared to full downloads and allows the user to confirm
+    before the main work begins. After prescan completes, a dialog is shown from
+    the Tk main thread with per-link counts and totals.
+    """
+    try:
+        # Enable cancel during prescan
+        try:
+            app_ref.cancel_btn.configure(state="normal")
+        except Exception:
+            pass
+
+        # Ensure output directory exists
+        out_root = Path(outdir)
+        out_root.mkdir(parents=True, exist_ok=True)
+
+        # Log configuration
+        try:
+            if img_original:
+                log.put(T(lang, "log_img_mode_original"))
+            else:
+                log.put(T(lang, "log_img_mode_thumb", w=preview_width))
+            log.put(T(lang, "log_vids", state=T(lang, "log_vids_on" if download_videos else "log_vids_off")))
+            log.put(T(lang, "log_processing", n=len(urls)))
+        except Exception:
+            pass
+
+        # Locate credentials for informative logging
+        cred_path = locate_credentials()
+        if cred_path:
+            # Let backend know where creds are
+            dfr.CREDENTIALS_FILE = str(cred_path)
+            log.put(T(lang, "log_creds_found", path=cred_path))
+        else:
+            log.put(T(lang, "log_creds_missing"))
+
+        # Configure backend variables for prescan
+        dfr.FOLDER_URLS = list(urls)
+        dfr.OUTPUT_DIR = str(out_root)
+        dfr.IMAGE_WIDTH = int(preview_width)
+        dfr.DOWNLOAD_VIDEOS = bool(download_videos)
+        dfr.DOWNLOAD_IMAGES_ORIGINAL = bool(img_original)
+        dfr.CONVERT_THUMBS_DIR = ""
+        
+        # Reset interrupted flag for new scan
+        dfr.INTERRUPTED = False
+
+        # Set language
+        dfr.LANG = lang
+
+        # Ensure backend logging outputs to console/file before adding GUI handler
+        try:
+            dfr_setup_logging()
+        except Exception:
+            pass
+
+        # Attach GUI logging handler to backend root logger
+        class _GuiHandler(dfr.logging.Handler):
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    log.put(msg)
+                except Exception:
+                    pass
+
+        fmt = dfr.logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S")
+        gui_handler = _GuiHandler()
+        gui_handler.setLevel(getattr(dfr.logging, dfr.LOG_LEVEL.upper(), dfr.logging.INFO))
+        gui_handler.setFormatter(fmt)
+        dfr.logging.getLogger().addHandler(gui_handler)
+
+        # Get service then run prescan with incremental updates
+        service, creds = dfr_auth.get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+        
+        # Track which summaries we've sent to the GUI
+        sent_count = [0]  # Use list to allow modification in nested function
+        prescan_done = [False]
+        
+        # Periodically check for new summaries and send to GUI
+        def _poll_summaries():
+            if prescan_done[0]:
+                return
+            try:
+                summaries = list(getattr(dfr, "LINK_SUMMARIES", []) or [])
+                for i in range(sent_count[0], len(summaries)):
+                    summary = summaries[i]
+                    try:
+                        app_ref.after(0, lambda s=summary: app_ref.add_prescan_folder(s))
+                    except Exception:
+                        pass
+                sent_count[0] = len(summaries)
+                # Schedule next poll
+                if not prescan_done[0]:
+                    import threading
+                    threading.Timer(0.3, _poll_summaries).start()
+            except Exception:
+                pass
+        
+        # Start polling in background
+        import threading
+        threading.Timer(0.1, _poll_summaries).start()
+        
+        # Run prescan (this blocks until all folders are scanned)
+        tasks = dfr_prescan.prescan_tasks(service)
+        prescan_done[0] = True
+        
+        # Send any remaining summaries
+        summaries = list(getattr(dfr, "LINK_SUMMARIES", []) or [])
+        for i in range(sent_count[0], len(summaries)):
+            summary = summaries[i]
+            try:
+                app_ref.after(0, lambda s=summary: app_ref.add_prescan_folder(s))
+            except Exception:
+                pass
+
+        # Collect totals from backend globals
+        try:
+            from dfr.utils import get_totals_snapshot
+            snap = get_totals_snapshot()
+            total_bytes = snap.get("bytes_written_expected") or dfr.EXPECTED_TOTAL_BYTES
+        except Exception:
+            total_bytes = dfr.EXPECTED_TOTAL_BYTES
+
+        # Bounce back to main thread to finish prescan
+        def _finish():
+            try:
+                app_ref.finish_prescan(tasks, total_bytes)
+            finally:
+                # Prescan finished; Start button is enabled in finish_prescan
+                pass
+        try:
+            app_ref.after(0, _finish)
+        except Exception:
+            # As a fallback, still re-enable Start if we cannot finish prescan
+            try:
+                app_ref.start_btn.configure(state="normal")
+                app_ref.cancel_btn.configure(state="disabled")
+            except Exception:
+                pass
+
+    except Exception:
+        # Log error with traceback to GUI and stderr
+        try:
+            log.put("\n" + T(lang, "fatal") + "\n" + traceback.format_exc())
+        except Exception:
+            pass
+        try:
+            sys.stderr.write(traceback.format_exc())
+            sys.stderr.flush()
+        except Exception:
+            pass
+        # Re-enable controls on failure
+        try:
+            app_ref.start_btn.configure(state="normal")
+            app_ref.cancel_btn.configure(state="disabled")
+        except Exception:
+            pass
 
 
 def start_worker_thread(target_func, *args, **kwargs):

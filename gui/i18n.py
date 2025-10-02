@@ -42,6 +42,22 @@ I18N = {
         "lang_en": "English",
         "lang_id": "Bahasa Indonesia",
 
+        # Pre-scan dialog
+        "prescan_title": "Pre-Scan Preview",
+        "prescan_desc": "Review expected downloads per link, then click Start to begin.",
+        "prescan_col_root": "Folder",
+        "prescan_col_images": "Images",
+        "prescan_col_videos": "Videos",
+        "prescan_col_data": "Data",
+        "prescan_totals": "Totals",
+        "prescan_bytes_total": "Estimated bytes",
+        "prescan_btn_start": "Start Download",
+        "prescan_btn_cancel": "Cancel",
+        "prescan_have_fmt": "have {n}",
+        "prescan_none": "Nothing to download.",
+        "prescan_loading": "Scanning folders",
+        "prescan_scanning": "Scanning in progress...",
+
         # Converter section
         "conv_title": "🔁 Convert Thumbnails to Original Images",
         "conv_subtitle": (
@@ -50,7 +66,7 @@ I18N = {
         ),
         "conv_pick_label": "Folder containing chosen thumbnails:",
         "conv_btn_choose": "Choose Folder…",
-        "conv_btn_start": "Start",
+        "conv_btn_start": "Start Conversion",
         "missing_conv_dir_title": "Missing folder",
         "missing_conv_dir_msg": "Please choose the folder that contains your selected thumbnails.",
         "log_conv_using": "[GUI] Converting thumbnails in: {path}",
@@ -92,6 +108,22 @@ I18N = {
         "language": "Bahasa / Language",
         "lang_en": "English",
         "lang_id": "Bahasa Indonesia",
+
+        # Pre-scan dialog
+        "prescan_title": "Pra-Pindai",
+        "prescan_desc": "Tinjau perkiraan unduhan per tautan, lalu klik Mulai untuk memulai.",
+        "prescan_col_root": "Folder",
+        "prescan_col_images": "Gambar",
+        "prescan_col_videos": "Video",
+        "prescan_col_data": "Data",
+        "prescan_totals": "Total",
+        "prescan_bytes_total": "Perkiraan byte",
+        "prescan_btn_start": "Mulai Unduh",
+        "prescan_btn_cancel": "Batal",
+        "prescan_have_fmt": "sudah {n}",
+        "prescan_none": "Tidak ada yang diunduh.",
+        "prescan_loading": "Memindai folder",
+        "prescan_scanning": "Pemindaian sedang berlangsung...",
 
         # Converter section
         "conv_title": "🔁 Ubah Thumbnail ke Gambar Asli",
