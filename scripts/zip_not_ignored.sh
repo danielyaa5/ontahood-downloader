@@ -36,12 +36,15 @@ trap cleanup EXIT
 # Collect files: tracked + untracked (not ignored), then filter
 # - remove any path containing a dot segment at start or in subdirs (e.g., .git, .vscode, .env, etc.)
 # - remove any .app.zip bundles
+# - remove output/ and __pycache__ paths
 # - remove empty lines (safety)
 # Note: newline-separated paths are used here. Paths with newlines are extremely rare.
 
 git ls-files --cached --others --exclude-standard \
   | grep -Ev '(^\.|/\.)' \
   | grep -Ev '\.app\.zip$' \
+  | grep -Ev '(^output/|/output/)' \
+  | grep -Ev '(^__pycache__/|/__pycache__/)' \
   | grep -v '^$' \
   > "$tmp_list"
 
