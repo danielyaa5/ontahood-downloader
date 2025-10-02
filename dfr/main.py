@@ -17,13 +17,10 @@ from .utils import extract_folder_id
 
 
 def main():
+    # Reset runtime counters but preserve prescan expectations and already-have counts
+    # so progress (done = already + done) reflects existing files.
     dfr.TOTALS = dfr.Totals()
-    dfr.EXPECTED_IMAGES = 0
-    dfr.EXPECTED_VIDEOS = 0
-    dfr.EXPECTED_DATA = 0
-    dfr.ALREADY_HAVE_IMAGES = 0
-    dfr.ALREADY_HAVE_VIDEOS = 0
-    dfr.ALREADY_HAVE_DATA = 0
+    # EXPECTED_* and ALREADY_HAVE_* are set by prescan; keep them as-is.
     dfr.START_TS = time.time()
     dfr.INTERRUPTED = False
     setup_logging()
