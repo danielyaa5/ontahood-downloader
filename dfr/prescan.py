@@ -80,7 +80,11 @@ def prescan_tasks(service) -> List[Dict]:
                                 except Exception:
                                     pass
                             else:
-                                link_images_bytes += 100 * 1024
+                                try:
+                                    from .utils import estimate_thumbnail_size_bytes
+                                    link_images_bytes += estimate_thumbnail_size_bytes(int(dfr.IMAGE_WIDTH))
+                                except Exception:
+                                    link_images_bytes += 100 * 1024
                     elif kind == "data":
                         link_data += 1
                         with dfr._LOCK:

@@ -19,6 +19,28 @@ def human_bytes(n: int) -> str:
     return f"{f:.2f} {units[i]}"
 
 
+def estimate_thumbnail_size_bytes(target_width: int) -> int:
+    """
+    Roughly estimate a JPEG thumbnail size (bytes) for a given width.
+
+    Assumptions:
+    - Typical aspect ratio ~ 4:3 (height = 0.75 * width)
+    - Typical JPEG quality ~1.5 bits per pixel (~0.1875 bytes/px)
+    Result: bytes ≈ 0.1875 * (width * height) = 0.1875 * 0.75 * width^2
+    Clamp to a sane range to avoid extremes.
+    """
+    try:
+        w = max(1, int(target_width))
+    except Exception:
+        w = 800
+    # bytes per square pixel constant derived from the assumptions above
+    bytes_per_pixel = 0.1875
+    height = int(0.75 * w)
+    est = int(bytes_per_pixel * w * height)
+    # Clamp between 40 KB and 3 MB to keep estimates reasonable
+    return int(min(max(est, 40 * 1024), 3 * 1024 * 1024))
+
+
 def elapsed() -> str:
     d = time.time() - dfr.START_TS
     h = int(d//3600); m = int((d%3600)//60); s = int(d%60)
