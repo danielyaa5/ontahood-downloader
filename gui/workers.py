@@ -361,6 +361,23 @@ def run_prescan(urls, outdir, log: TkLogHandler,
         dfr.DOWNLOAD_IMAGES_ORIGINAL = bool(img_original)
         dfr.CONVERT_THUMBS_DIR = ""
         
+        # Choose a sensible concurrency for prescan
+        try:
+            # Respect env if provided and >0; otherwise derive from CPU and URL count
+            env_conc = int(os.environ.get("CONCURRENCY", "0"))
+        except Exception:
+            env_conc = 0
+        auto_conc = max(2, (os.cpu_count() or 4))
+        # Clamp to avoid excessive Drive API rate limits
+        chosen = env_conc if env_conc > 0 else min(max(2, auto_conc), 12)
+        # Also do not exceed number of URLs
+        chosen = max(1, min(chosen, len(dfr.FOLDER_URLS) or 1))
+        dfr.CONCURRENCY = int(chosen)
+        try:
+            log.put(f"[GUI] Prescan concurrency: {dfr.CONCURRENCY}")
+        except Exception:
+            pass
+        
         # Reset interrupted flag for new scan
         dfr.INTERRUPTED = False
         
