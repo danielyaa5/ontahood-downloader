@@ -633,7 +633,9 @@ class App(tk.Tk):
         # Get total folder count from pending context
         try:
             self._prescan_folders_total = len(self._pending_start_ctx.get("urls", []))
-        except Exception:
+            print(f"[DEBUG] Prescan window created with {self._prescan_folders_scanned}/{self._prescan_folders_total} folders")
+        except Exception as e:
+            print(f"[DEBUG] Error getting folder total: {e}")
             self._prescan_folders_total = 0
 
         win = tk.Toplevel(self)
@@ -776,12 +778,17 @@ class App(tk.Tk):
             total = getattr(self, "_prescan_folders_total", 0)
             if total > 0:
                 progress_text = f"{T(self.lang, 'prescan_scanning')}{dots} ({scanned}/{total})"
+                if self._prescan_loading_dots % 4 == 0:  # Log every 2 seconds
+                    print(f"[DEBUG] Animation update: {scanned}/{total}")
             else:
                 progress_text = f"{T(self.lang, 'prescan_scanning')}{dots}"
+                if self._prescan_loading_dots % 4 == 0:
+                    print(f"[DEBUG] Animation update: total=0")
             self._prescan_loading_label.configure(text=progress_text)
             self._prescan_loading_dots += 1
             self.after(500, self._animate_prescan_loading)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] Animation error: {e}")
             self._prescan_loading = False
     
     def add_prescan_folder(self, summary):
