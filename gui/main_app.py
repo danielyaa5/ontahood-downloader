@@ -667,16 +667,16 @@ class App(tk.Tk):
         desc.pack(anchor="w", padx=12, pady=(12, 6))
 
         # Treeview for per-link counts
-        cols = ("root", "images", "videos", "data")
+        cols = ("root", "images", "videos", "size")
         tree = ttk.Treeview(win, columns=cols, show="headings", height=12)
         tree.heading("root", text=T(self.lang, "prescan_col_root"))
         tree.heading("images", text=T(self.lang, "prescan_col_images"))
         tree.heading("videos", text=T(self.lang, "prescan_col_videos"))
-        tree.heading("data", text=T(self.lang, "prescan_col_data"))
+        tree.heading("size", text="Size")
         tree.column("root", width=320, anchor="w")
         tree.column("images", width=140, anchor="center")
         tree.column("videos", width=140, anchor="center")
-        tree.column("data", width=140, anchor="center")
+        tree.column("size", width=140, anchor="center")
         tree.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         
         self._prescan_tree = tree
@@ -779,8 +779,24 @@ class App(tk.Tk):
             root_name = summary.get("root_name") or summary.get("url") or "(link)"
             imgs = f"{summary.get('images',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('images_existing',0)) + ")"
             vids = f"{summary.get('videos',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('videos_existing',0)) + ")"
-            data = f"{summary.get('data',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('data_existing',0)) + ")"
-            self._prescan_tree.insert("", "end", values=(root_name, imgs, vids, data))
+            
+            # Calculate total size for this folder
+            folder_bytes = summary.get('images_bytes', 0) + summary.get('videos_bytes', 0) + summary.get('data_bytes', 0)
+            try:
+                import drive_fetch_resilient as dfr
+                size_text = dfr.human_bytes(int(folder_bytes))
+            except Exception:
+                # Fallback formatting
+                if folder_bytes >= 1024**3:
+                    size_text = f"{folder_bytes / (1024**3):.2f} GB"
+                elif folder_bytes >= 1024**2:
+                    size_text = f"{folder_bytes / (1024**2):.2f} MB"
+                elif folder_bytes >= 1024:
+                    size_text = f"{folder_bytes / 1024:.2f} KB"
+                else:
+                    size_text = f"{folder_bytes} B"
+            
+            self._prescan_tree.insert("", "end", values=(root_name, imgs, vids, size_text))
             
             # Update running totals
             self._prescan_totals["images"] += summary.get('images', 0)
