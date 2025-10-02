@@ -790,6 +790,11 @@ class App(tk.Tk):
             self._prescan_totals["have_videos"] += summary.get('videos_existing', 0)
             self._prescan_totals["have_data"] += summary.get('data_existing', 0)
             
+            # Accumulate bytes from this folder
+            self._prescan_total_bytes += summary.get('images_bytes', 0)
+            self._prescan_total_bytes += summary.get('videos_bytes', 0)
+            self._prescan_total_bytes += summary.get('data_bytes', 0)
+            
             self._update_prescan_totals()
         except Exception:
             pass
