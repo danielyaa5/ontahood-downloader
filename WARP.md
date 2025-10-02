@@ -5,7 +5,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 Project summary
 - Purpose: Download fast, low-res image previews and optional full-size videos from shared Google Drive folders; optionally convert selected local thumbnails into full-size originals.
 - Primary language: Python
-- Entry points: drive_fetch_gui.py (Tkinter GUI), drive_fetch_resilient.py (headless/core logic)
+- Entry points: gui_main.py (modular Tkinter GUI), drive_fetch_resilient.py (headless/core logic)
 - Packaging target: macOS universal2 app via PyInstaller (built by pre-commit.sh)
 
 Common commands
@@ -16,7 +16,7 @@ python3 -m pip install -r requirements.txt
 
 - Run the GUI (recommended for normal use)
 ```bash path=null start=null
-python3 drive_fetch_gui.py
+python3 gui_main.py
 ```
 
 - Headless run (download previews and optional videos)
@@ -100,7 +100,7 @@ High-level architecture
     - Originals: <name>__<fileid><ext>
   - Accounting and logs: Per-folder and global counters; human-readable byte totals and elapsed; i18n via LANG ("en"/"id"). Logs to stdout and rotating file drive_fetch.log under OUTPUT_DIR.
 
-- GUI (drive_fetch_gui.py)
+- GUI (gui_main.py and gui/ package)
   - Tkinter-based bilingual interface (English/Bahasa Indonesia) wrapping the core module.
   - Two sections:
     - Downloader: paste Drive folder URLs; choose output, image mode (thumbnail width or ORIGINAL), toggle videos; streams backend logs into a non-intrusive log view that only auto-scrolls when at bottom.

@@ -127,7 +127,7 @@ ADD_DATA=( --add-data "drive_fetch_resilient.py:." )
   "${EXTRA_FLAGS[@]}" \
   "${REQ_IMPORT_FLAGS[@]-}" \
   "${ADD_DATA[@]}" \
-  drive_fetch_gui.py
+  gui_main.py
 
 # -------- Post-build verification --------
 if [[ ! -x "$APP_BIN" ]]; then
