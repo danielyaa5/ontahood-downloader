@@ -767,6 +767,22 @@ class App(tk.Tk):
         
         self._prescan_loading = True
     
+    def _set_prescan_loading_text(self):
+        """Update the loading label text once using current counters."""
+        try:
+            if not hasattr(self, "_prescan_loading_label") or not self._prescan_loading_label:
+                return
+            dots = "." * (self._prescan_loading_dots % 4)
+            scanned = getattr(self, "_prescan_folders_scanned", 0)
+            total = getattr(self, "_prescan_folders_total", 0)
+            if total:
+                txt = f"{T(self.lang, 'prescan_scanning')}{dots} ({scanned}/{total})"
+            else:
+                txt = f"{T(self.lang, 'prescan_scanning')}{dots}"
+            self._prescan_loading_label.configure(text=txt)
+        except Exception:
+            pass
+    
     def _animate_prescan_loading(self):
         """Animate loading dots in prescan window."""
         if not hasattr(self, "_prescan_loading") or not self._prescan_loading:
@@ -777,29 +793,9 @@ class App(tk.Tk):
             return
         
         try:
-            dots = "." * (self._prescan_loading_dots % 4)
-            # Show progress: "Scanning in progress... (3/8)"
-            scanned = getattr(self, "_prescan_folders_scanned", 0)
-            total = getattr(self, "_prescan_folders_total", 0)
-            if not total:
-                # Fallbacks to derive total if not initialized yet
-                try:
-                    total = len(self._pending_start_ctx.get("urls", []))
-                except Exception:
-                    pass
-                if not total:
-                    try:
-                        import drive_fetch_resilient as dfr
-                        total = len(getattr(dfr, "FOLDER_URLS", []) or [])
-                        setattr(self, "_prescan_folders_total", total)
-                    except Exception:
-                        total = 0
-            if total > 0:
-                progress_text = f"{T(self.lang, 'prescan_scanning')}{dots} ({scanned}/{total})"
-            else:
-                progress_text = f"{T(self.lang, 'prescan_scanning')}{dots}"
-            self._prescan_loading_label.configure(text=progress_text)
+            # Advance dots and refresh text
             self._prescan_loading_dots += 1
+            self._set_prescan_loading_text()
             self.after(500, self._animate_prescan_loading)
         except Exception as e:
             try:
@@ -851,6 +847,8 @@ class App(tk.Tk):
             
             # Increment scanned folder count
             self._prescan_folders_scanned += 1
+            # Refresh loading footer immediately
+            self._set_prescan_loading_text()
             
             self._update_prescan_totals()
         except Exception:
