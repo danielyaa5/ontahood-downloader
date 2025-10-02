@@ -97,7 +97,6 @@ def main():
         )
     )
 
-    from .auth import get_service_and_creds, get_account_info
     service, creds = get_service_and_creds(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
     acct = get_account_info(service)
     if acct.get("email") or acct.get("name"):
