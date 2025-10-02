@@ -489,6 +489,7 @@ class App(tk.Tk):
                 pass
             
             # Create prescan window immediately with loading state
+            # Pass the number of URLs so we can display the counter
             self.create_prescan_window()
             
             # Start prescan worker thread
@@ -629,7 +630,11 @@ class App(tk.Tk):
         self._prescan_total_bytes = 0
         self._prescan_loading_dots = 0
         self._prescan_folders_scanned = 0
-        self._prescan_folders_total = len(self._pending_start_ctx.get("urls", []))
+        # Get total folder count from pending context
+        try:
+            self._prescan_folders_total = len(self._pending_start_ctx.get("urls", []))
+        except Exception:
+            self._prescan_folders_total = 0
 
         win = tk.Toplevel(self)
         self._prescan_win = win
