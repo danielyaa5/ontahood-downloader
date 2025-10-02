@@ -34,6 +34,9 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
             logging.info(dfr.L(f"= exists (image): {target}", f"= sudah ada (gambar): {target}"))
             with dfr._LOCK:
                 dfr.TOTALS.grand.images_skipped += 1; folder_ctrs.images_skipped += 1
+                # In converter mode, count existing originals as completed
+                if dfr.CONVERT_THUMBS_DIR:
+                    dfr.ALREADY_HAVE_IMAGES += 1
             return True
         if dfr.DOWNLOAD_IMAGES_ORIGINAL:
             logging.info(dfr.L(f"Downloading image original -> {target}",
