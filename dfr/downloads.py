@@ -5,6 +5,8 @@ import os, io, time, logging, requests
 from typing import Set
 from googleapiclient.http import MediaIoBaseDownload
 from google.auth.transport.requests import AuthorizedSession
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 import drive_fetch_resilient as dfr
 from .utils import ensure_dir, human_bytes
@@ -12,6 +14,21 @@ from .listing import get_item
 
 # Track targets that are currently being written so we can clean up on cancel/exit
 INCOMPLETE_TARGETS: Set[str] = set()
+
+# Reusable pooled session for thumbnails to reduce TLS handshakes
+_THUMB_SESSION = None
+
+def _get_thumb_session():
+    global _THUMB_SESSION
+    if _THUMB_SESSION is None:
+        sess = requests.Session()
+        # Pool sized to handle moderate concurrency without exhaustion
+        pool_size = 64
+        adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=Retry(total=0))
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _THUMB_SESSION = sess
+    return _THUMB_SESSION
 
 
 def _mark_incomplete(target: str):
@@ -43,9 +60,10 @@ def cleanup_incomplete_targets():
 
 def download_thumbnail(url: str, out_path: str, retries=10) -> bool:
     _mark_incomplete(out_path)
+    sess = _get_thumb_session()
     for attempt in range(1, retries + 1):
         try:
-            with requests.get(url, stream=True, timeout=60) as r:
+            with sess.get(url, stream=True, timeout=60) as r:
                 if r.status_code == 404:
                     raise requests.HTTPError("thumbnail not ready (404)")
                 r.raise_for_status()
@@ -73,15 +91,31 @@ def download_thumbnail(url: str, out_path: str, retries=10) -> bool:
 
 
 def download_file_resumable(service, creds, file_id: str, target: str, label: str = "File") -> bool:
+    """Download a Drive file with resume support.
+
+    service can be None; in that case, metadata (size/name) will be fetched via
+    the AuthorizedSession instead of the Drive SDK resource. This allows safe
+    use from multiple threads without sharing a single client.
+    """
     _mark_incomplete(target)
     ensure_dir(os.path.dirname(target))
     session = AuthorizedSession(creds)
     url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
     total_size = None
+    # Fetch metadata for size reporting
     try:
-        meta = get_item(service, file_id, "size, name")
-        if "size" in meta:
-            total_size = int(meta["size"])
+        if service is not None:
+            meta = get_item(service, file_id, "size, name")
+        else:
+            meta_resp = session.get(
+                f"https://www.googleapis.com/drive/v3/files/{file_id}",
+                params={"fields": "size,name", "supportsAllDrives": "true"},
+                timeout=30,
+            )
+            meta_resp.raise_for_status()
+            meta = meta_resp.json() if hasattr(meta_resp, "json") else {}
+        if isinstance(meta, dict) and "size" in meta:
+            total_size = int(meta.get("size") or 0)
     except Exception as e:
         logging.debug(dfr.L(f"Could not get size for {file_id}: {e}",
                             f"Tidak bisa mendapatkan ukuran untuk {file_id}: {e}"))
@@ -110,7 +144,8 @@ def download_file_resumable(service, creds, file_id: str, target: str, label: st
                             return True
                         r.raise_for_status()
                     with open(target, mode) as f:
-                        for chunk in r.iter_content(chunk_size=8*1024*1024):
+                        # Slightly larger chunks improve throughput on stable links
+                        for chunk in r.iter_content(chunk_size=16*1024*1024):
                             if dfr.INTERRUPTED:
                                 return False
                             dfr.wait_if_paused()

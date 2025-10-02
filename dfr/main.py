@@ -4,6 +4,8 @@
 import os, re, logging, time
 from pathlib import Path
 from typing import List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 import drive_fetch_resilient as dfr
 from .logfmt import setup_logging
@@ -126,19 +128,50 @@ def main():
         else:
             image_tasks.append(f)
 
-    # Sequential images
-    for f in image_tasks:
-        if dfr.INTERRUPTED:
-            break
-        wait_if_paused()
+    # Images with concurrency
+    if image_tasks:
+        # Determine concurrency (default 6, capped to avoid API limits)
         try:
-            ok = process_file(service, creds, f, f['__folder_out'], f['__root_name'])
-            if ok:
-                print_progress()
-        except Exception as e:
-            logging.error(dfr.L(f"Worker error: {e}", f"Kesalahan pekerja: {e}"))
+            chosen = int(getattr(dfr, "CONCURRENCY", 6) or 6)
+        except Exception:
+            chosen = 6
+        chosen = max(1, min(chosen, 12))
+        logging.info(dfr.L(f"Image download concurrency: {chosen}",
+                           f"Konkruensi unduh gambar: {chosen}"))
 
-    # Sequential videos
+        # For ORIGINAL images, create per-thread service/creds to avoid sharing clients across threads
+        local_ctx = threading.local()
+        def _get_local_service():
+            if getattr(local_ctx, "svc", None) is None or getattr(local_ctx, "creds", None) is None:
+                from .auth import get_service_and_creds as _get
+                local_ctx.svc, local_ctx.creds = _get(dfr.TOKEN_FILE, dfr.CREDENTIALS_FILE)
+            return local_ctx.svc, local_ctx.creds
+
+        def _proc_image(f):
+            if dfr.INTERRUPTED:
+                return False
+            wait_if_paused()
+            try:
+                if bool(getattr(dfr, "DOWNLOAD_IMAGES_ORIGINAL", False)):
+                    svc_l, creds_l = _get_local_service()
+                    ok = process_file(svc_l, creds_l, f, f['__folder_out'], f['__root_name'])
+                else:
+                    ok = process_file(service, creds, f, f['__folder_out'], f['__root_name'])
+                return ok
+            except Exception as _e:
+                logging.error(dfr.L(f"Worker error: {_e}", f"Kesalahan pekerja: {_e}"))
+                return False
+
+        with ThreadPoolExecutor(max_workers=chosen) as ex:
+            futures = [ex.submit(_proc_image, f) for f in image_tasks]
+            for fut in as_completed(futures):
+                try:
+                    if fut.result():
+                        print_progress()
+                except Exception as _e2:
+                    logging.error(dfr.L(f"Worker error: {_e2}", f"Kesalahan pekerja: {_e2}"))
+
+    # Sequential videos (keep simple to reduce rate-limit risk)
     for f in video_tasks:
         if dfr.INTERRUPTED:
             break

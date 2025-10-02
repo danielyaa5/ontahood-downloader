@@ -12,6 +12,26 @@ from .process import print_folder_summary
 
 
 def prescan_tasks(service) -> List[Dict]:
+    """
+    Build the task list by traversing all provided Drive folders.
+
+    IMPORTANT: Reset global counters at the beginning so repeated pre-scans
+    in the same process don't accumulate EXPECTED_*, ALREADY_HAVE_*, and size
+    totals. The main run will preserve these values after prescan to show
+    correct progress (done = already + downloaded).
+    """
+    # Full reset to avoid inflated totals when prescan runs multiple times
+    try:
+        dfr.reset_counters()
+    except Exception:
+        # Fallback: ensure at least these are cleared
+        dfr.EXPECTED_IMAGES = 0
+        dfr.EXPECTED_VIDEOS = 0
+        dfr.ALREADY_HAVE_IMAGES = 0
+        dfr.ALREADY_HAVE_VIDEOS = 0
+        dfr.EXPECTED_TOTAL_BYTES = 0
+        dfr.LINK_SUMMARIES = []
+
     dfr.LINK_SUMMARIES = []
 
     urls = list(dfr.FOLDER_URLS)

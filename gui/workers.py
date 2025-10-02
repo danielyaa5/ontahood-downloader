@@ -24,7 +24,7 @@ from .log_handler import TkLogHandler
 
 def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
                preview_width: int, download_videos: bool, img_original: bool, 
-               app_ref, lang: str):
+               app_ref, lang: str, concurrency: int = 3):
     """
     Main worker function for downloading from Google Drive URLs.
     
@@ -98,6 +98,21 @@ def run_worker(urls, outdir, log: TkLogHandler, btn: ttk.Button,
         dfr.DOWNLOAD_VIDEOS = bool(download_videos)
         dfr.DOWNLOAD_IMAGES_ORIGINAL = bool(img_original)
         dfr.CONVERT_THUMBS_DIR = ""  # make sure converter mode is off
+
+        # Choose sensible concurrency for the main download (images run in parallel)
+        try:
+            env_conc = int(os.environ.get("CONCURRENCY", "0"))
+        except Exception:
+            env_conc = 0
+        # Default to UI-provided value (concurrency), fallback to env, then 3
+        chosen = int(concurrency or 0) if str(concurrency).isdigit() else 0
+        if chosen <= 0:
+            chosen = env_conc if env_conc > 0 else 3
+        dfr.CONCURRENCY = int(max(1, min(chosen, 12)))
+        try:
+            log.put(f"[GUI] Download concurrency: {dfr.CONCURRENCY}")
+        except Exception:
+            pass
         
         # Ensure backend logging outputs to console/file before adding GUI handler
         try:
@@ -314,7 +329,7 @@ def run_converter(local_folder: str, log: TkLogHandler, btn: ttk.Button, app_ref
 
 def run_prescan(urls, outdir, log: TkLogHandler,
                preview_width: int, download_videos: bool, img_original: bool,
-               app_ref, lang: str):
+               app_ref, lang: str, concurrency: int = 3):
     """
     Perform a pre-scan of the provided URLs and show a preview dialog in the GUI.
 
@@ -363,15 +378,15 @@ def run_prescan(urls, outdir, log: TkLogHandler,
         
         # Choose a sensible concurrency for prescan
         try:
-            # Respect env if provided and >0; otherwise derive from CPU and URL count
+            # Respect UI or env if provided; otherwise derive from CPU and URL count
             env_conc = int(os.environ.get("CONCURRENCY", "0"))
         except Exception:
             env_conc = 0
+        ui_conc = int(concurrency or 0) if str(concurrency).isdigit() else 0
         auto_conc = max(2, (os.cpu_count() or 4))
-        # Clamp to avoid excessive Drive API rate limits
-        chosen = env_conc if env_conc > 0 else min(max(2, auto_conc), 12)
-        # Also do not exceed number of URLs
-        chosen = max(1, min(chosen, len(dfr.FOLDER_URLS) or 1))
+        # Prefer UI, then env, then auto; clamp and don't exceed URL count
+        chosen = ui_conc if ui_conc > 0 else (env_conc if env_conc > 0 else min(max(2, auto_conc), 12))
+        chosen = max(1, min(chosen, len(dfr.FOLDER_URLS) or 1, 12))
         dfr.CONCURRENCY = int(chosen)
         try:
             log.put(f"[GUI] Prescan concurrency: {dfr.CONCURRENCY}")

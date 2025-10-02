@@ -159,11 +159,29 @@ class App(tk.Tk):
         
         # Video download option
         video_row = ttk.Frame(self)
-        video_row.pack(fill="x", padx=12, pady=(0, 10))
+        video_row.pack(fill="x", padx=12, pady=(0, 6))
         
         self.videos_var = tk.BooleanVar(value=True)
         self.videos_check = ttk.Checkbutton(video_row, variable=self.videos_var)
         self.videos_check.pack(side="left")
+        
+        # Concurrency control
+        conc_row = ttk.Frame(self)
+        conc_row.pack(fill="x", padx=12, pady=(0, 10))
+        
+        self.conc_label = ttk.Label(conc_row)
+        self.conc_label.pack(side="left")
+        
+        self.concurrency_var = tk.IntVar(value=3)
+        try:
+            self.conc_spin = ttk.Spinbox(conc_row, from_=1, to=12, textvariable=self.concurrency_var, width=5)
+        except Exception:
+            # Fallback for environments without ttk.Spinbox
+            self.conc_spin = tk.Spinbox(conc_row, from_=1, to=12, textvariable=self.concurrency_var, width=5)
+        self.conc_spin.pack(side="left", padx=(8, 8))
+        
+        self.conc_hint = ttk.Label(conc_row, wraplength=520, justify="left")
+        self.conc_hint.pack(side="left")
         
         # Control buttons
         btn_row = ttk.Frame(self)
@@ -298,6 +316,7 @@ class App(tk.Tk):
                 self.sizevar.set(prefs["image_mode"])
             
             self.videos_var.set(prefs.get("download_videos", True))
+            self.concurrency_var.set(int(prefs.get("concurrency", 3) or 3))
             
             if prefs.get("urls"):
                 self.urlbox.delete("1.0", tk.END)
@@ -323,6 +342,7 @@ class App(tk.Tk):
                 "download_videos": self.videos_var.get(),
                 "urls": self.urlbox.get("1.0", tk.END),
                 "converter_dir": self.conv_dir_var.get(),
+                "concurrency": int(self.concurrency_var.get() or 3),
             }
             self.prefs_manager.save_preferences(prefs)
         except Exception:
@@ -414,6 +434,8 @@ class App(tk.Tk):
         self.log_title.configure(text=T(self.lang, "log"))
         self.images_label.configure(text=T(self.lang, "images"))
         self.videos_label.configure(text=T(self.lang, "videos"))
+        self.conc_label.configure(text=T(self.lang, "concurrency_label"))
+        self.conc_hint.configure(text=T(self.lang, "concurrency_hint"))
         
         # Update language selector
         self.lang_var.set(T(self.lang, "lang_id" if self.lang == "id" else "lang_en"))
@@ -479,6 +501,7 @@ class App(tk.Tk):
                 "width": width,
                 "img_original": img_original,
                 "download_videos": self.videos_var.get(),
+                "concurrency": int(self.concurrency_var.get() or 3),
             }
 
             # Disable Start and enable Cancel while prescan runs
@@ -497,7 +520,7 @@ class App(tk.Tk):
                 run_prescan,
                 urls, outdir, self.log_handler,
                 width, self.videos_var.get(), img_original,
-                self, self.lang
+                self, self.lang, int(self.concurrency_var.get() or 3)
             )
         except Exception as e:
             import traceback
@@ -755,7 +778,7 @@ class App(tk.Tk):
                 run_worker,
                 ctx.get("urls"), ctx.get("outdir"), self.log_handler, self.start_btn,
                 ctx.get("width"), self._pending_start_ctx.get("download_videos", True), ctx.get("img_original"),
-                self, self.lang
+                self, self.lang, int(ctx.get("concurrency") or 3)
             )
 
         cancel_button = ttk.Button(btn_row, text=T(self.lang, "prescan_btn_cancel"), command=on_cancel)
