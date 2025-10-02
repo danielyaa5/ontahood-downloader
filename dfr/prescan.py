@@ -64,33 +64,50 @@ def prescan_tasks(service) -> List[Dict]:
                             img_target = os.path.join(target_dir, f"{base}__{fid}{ext_out}")
                         else:
                             img_target = os.path.join(target_dir, f"{base}__{fid}_w{dfr.IMAGE_WIDTH}.jpg")
+                        
+                        # Always count size for all files (not just missing ones)
+                        if dfr.DOWNLOAD_IMAGES_ORIGINAL:
+                            try:
+                                sz = int(f.get("size") or 0)
+                                if not sz:
+                                    meta = get_item(svc, fid, "size")
+                                    sz = int(meta.get("size") or 0)
+                                link_images_bytes += sz
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                from .utils import estimate_thumbnail_size_bytes
+                                link_images_bytes += estimate_thumbnail_size_bytes(int(dfr.IMAGE_WIDTH))
+                            except Exception:
+                                link_images_bytes += 100 * 1024
+                        
                         if os.path.exists(img_target):
                             with dfr._LOCK:
                                 dfr.ALREADY_HAVE_IMAGES += 1
                             link_images_existing += 1
                         else:
                             local_tasks.append(f)
-                            if dfr.DOWNLOAD_IMAGES_ORIGINAL:
-                                try:
-                                    sz = int(f.get("size") or 0)
-                                    if not sz:
-                                        meta = get_item(svc, fid, "size")
-                                        sz = int(meta.get("size") or 0)
-                                    link_images_bytes += sz
-                                except Exception:
-                                    pass
-                            else:
-                                try:
-                                    from .utils import estimate_thumbnail_size_bytes
-                                    link_images_bytes += estimate_thumbnail_size_bytes(int(dfr.IMAGE_WIDTH))
-                                except Exception:
-                                    link_images_bytes += 100 * 1024
                     else:  # video
                         link_videos += 1
                         with dfr._LOCK:
                             dfr.EXPECTED_VIDEOS += 1
                         ext_out = ext or ".mp4"
                         vid_target = os.path.join(target_dir, f"{base}__{fid}{ext_out}")
+                        
+                        # Always count size for all videos (not just missing ones)
+                        try:
+                            sz = int(f.get("size") or 0)
+                            if not sz:
+                                meta = get_item(svc, fid, "size")
+                                sz = int(meta.get("size") or 0)
+                            link_videos_bytes += sz
+                        except Exception:
+                            logging.debug(dfr.L(
+                                f"Could not get size for video {fid}",
+                                f"Tidak bisa mendapatkan ukuran untuk video {fid}"
+                            ))
+                        
                         if os.path.exists(vid_target):
                             with dfr._LOCK:
                                 dfr.ALREADY_HAVE_VIDEOS += 1
@@ -98,17 +115,6 @@ def prescan_tasks(service) -> List[Dict]:
                         else:
                             if dfr.DOWNLOAD_VIDEOS:
                                 local_tasks.append(f)
-                                try:
-                                    sz = int(f.get("size") or 0)
-                                    if not sz:
-                                        meta = get_item(svc, fid, "size")
-                                        sz = int(meta.get("size") or 0)
-                                    link_videos_bytes += sz
-                                except Exception:
-                                    logging.debug(dfr.L(
-                                        f"Could not get size for video {fid}",
-                                        f"Tidak bisa mendapatkan ukuran untuk video {fid}"
-                                    ))
         except Exception as e:
             logging.error(dfr.L(f"Listing failed for URL {url}: {e}", f"Listing gagal untuk URL {url}: {e}"))
             return local_tasks
