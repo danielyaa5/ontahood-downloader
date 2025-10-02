@@ -696,7 +696,12 @@ class App(tk.Tk):
         self._prescan_totals_label = totals_label
         
         # Loading animation footer
-        loading_label = ttk.Label(win, text=T(self.lang, "prescan_scanning"), justify="center")
+        # Initialize with current counters so user sees (0/N) immediately
+        scanned = getattr(self, "_prescan_folders_scanned", 0)
+        total = getattr(self, "_prescan_folders_total", 0)
+        base_text = T(self.lang, "prescan_scanning")
+        initial_text = f"{base_text} ({scanned}/{total})" if total > 0 else base_text
+        loading_label = ttk.Label(win, text=initial_text, justify="center")
         loading_label.pack(anchor="center", padx=12, pady=(0, 10))
         self._prescan_loading_label = loading_label
         self._animate_prescan_loading()
@@ -776,19 +781,31 @@ class App(tk.Tk):
             # Show progress: "Scanning in progress... (3/8)"
             scanned = getattr(self, "_prescan_folders_scanned", 0)
             total = getattr(self, "_prescan_folders_total", 0)
+            if not total:
+                # Fallbacks to derive total if not initialized yet
+                try:
+                    total = len(self._pending_start_ctx.get("urls", []))
+                except Exception:
+                    pass
+                if not total:
+                    try:
+                        import drive_fetch_resilient as dfr
+                        total = len(getattr(dfr, "FOLDER_URLS", []) or [])
+                        setattr(self, "_prescan_folders_total", total)
+                    except Exception:
+                        total = 0
             if total > 0:
                 progress_text = f"{T(self.lang, 'prescan_scanning')}{dots} ({scanned}/{total})"
-                if self._prescan_loading_dots % 4 == 0:  # Log every 2 seconds
-                    print(f"[DEBUG] Animation update: {scanned}/{total}")
             else:
                 progress_text = f"{T(self.lang, 'prescan_scanning')}{dots}"
-                if self._prescan_loading_dots % 4 == 0:
-                    print(f"[DEBUG] Animation update: total=0")
             self._prescan_loading_label.configure(text=progress_text)
             self._prescan_loading_dots += 1
             self.after(500, self._animate_prescan_loading)
         except Exception as e:
-            print(f"[DEBUG] Animation error: {e}")
+            try:
+                print(f"[DEBUG] Animation error: {e}")
+            except Exception:
+                pass
             self._prescan_loading = False
     
     def add_prescan_folder(self, summary):

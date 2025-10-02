@@ -363,6 +363,13 @@ def run_prescan(urls, outdir, log: TkLogHandler,
         
         # Reset interrupted flag for new scan
         dfr.INTERRUPTED = False
+        
+        # Inform GUI of total folder count (helps the loading counter)
+        try:
+            total_urls = len(dfr.FOLDER_URLS)
+            app_ref.after(0, lambda n=total_urls: setattr(app_ref, "_prescan_folders_total", n))
+        except Exception:
+            pass
 
         # Set language
         dfr.LANG = lang
