@@ -628,6 +628,8 @@ class App(tk.Tk):
         self._prescan_totals = {"images": 0, "videos": 0, "data": 0, "have_images": 0, "have_videos": 0, "have_data": 0}
         self._prescan_total_bytes = 0
         self._prescan_loading_dots = 0
+        self._prescan_folders_scanned = 0
+        self._prescan_folders_total = len(self._pending_start_ctx.get("urls", []))
 
         win = tk.Toplevel(self)
         self._prescan_win = win
@@ -764,7 +766,14 @@ class App(tk.Tk):
         
         try:
             dots = "." * (self._prescan_loading_dots % 4)
-            self._prescan_loading_label.configure(text=T(self.lang, "prescan_scanning") + dots)
+            # Show progress: "Scanning in progress... (3/8)"
+            scanned = getattr(self, "_prescan_folders_scanned", 0)
+            total = getattr(self, "_prescan_folders_total", 0)
+            if total > 0:
+                progress_text = f"{T(self.lang, 'prescan_scanning')}{dots} ({scanned}/{total})"
+            else:
+                progress_text = f"{T(self.lang, 'prescan_scanning')}{dots}"
+            self._prescan_loading_label.configure(text=progress_text)
             self._prescan_loading_dots += 1
             self.after(500, self._animate_prescan_loading)
         except Exception:
@@ -810,6 +819,9 @@ class App(tk.Tk):
             self._prescan_total_bytes += summary.get('images_bytes', 0)
             self._prescan_total_bytes += summary.get('videos_bytes', 0)
             self._prescan_total_bytes += summary.get('data_bytes', 0)
+            
+            # Increment scanned folder count
+            self._prescan_folders_scanned += 1
             
             self._update_prescan_totals()
         except Exception:
