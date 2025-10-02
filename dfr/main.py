@@ -106,9 +106,12 @@ def main():
 
     if dfr.DIRECT_TASKS:
         tasks = dfr.DIRECT_TASKS
-        from .utils import classify_media
-        dfr.EXPECTED_IMAGES = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "image")
-        dfr.EXPECTED_VIDEOS = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "video")
+        # If prescan has already populated EXPECTED_* and ALREADY_HAVE_* values (GUI flow),
+        # do NOT overwrite them here. Only compute expectations when they are unset (CLI/retry flows).
+        if (int(dfr.EXPECTED_IMAGES) + int(dfr.EXPECTED_VIDEOS)) == 0:
+            from .utils import classify_media
+            dfr.EXPECTED_IMAGES = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "image")
+            dfr.EXPECTED_VIDEOS = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "video")
         logging.info(dfr.L(f"Using direct task list: {len(tasks)} items", f"Memakai daftar tugas langsung: {len(tasks)} item"))
     else:
         tasks = prescan_tasks(service)
