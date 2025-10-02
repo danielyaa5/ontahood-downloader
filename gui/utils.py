@@ -91,7 +91,7 @@ def validate_image_size(size_str: str) -> tuple[bool, int]:
     Validate and parse image size input.
     
     Args:
-        size_str: Size string (e.g., "400", "ORIGINAL")
+        size_str: Size string (e.g., "400", "700 (thumbnail)", "ORIGINAL (full size)")
         
     Returns:
         Tuple of (is_valid, parsed_size)
@@ -99,15 +99,20 @@ def validate_image_size(size_str: str) -> tuple[bool, int]:
     """
     size_str = size_str.strip().upper()
     
-    if size_str == "ORIGINAL":
+    # Check for ORIGINAL mode (handles both "ORIGINAL" and "ORIGINAL (full size)")
+    if "ORIGINAL" in size_str:
         return True, -1
     
     try:
-        size = int(size_str.replace("PX", "").strip())
-        if 100 <= size <= 6000:
-            return True, size
-        else:
-            return False, 0
+        # Extract just the numeric part before any parentheses
+        # Handles formats like "700 (thumbnail)" or "400px"
+        import re
+        match = re.match(r'(\d+)', size_str)
+        if match:
+            size = int(match.group(1))
+            if 100 <= size <= 6000:
+                return True, size
+        return False, 0
     except (ValueError, AttributeError):
         return False, 0
 

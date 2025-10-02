@@ -626,7 +626,7 @@ class App(tk.Tk):
             pass
 
         self._prescan_tasks = []
-        self._prescan_totals = {"images": 0, "videos": 0, "data": 0, "have_images": 0, "have_videos": 0, "have_data": 0}
+        self._prescan_totals = {"images": 0, "videos": 0, "have_images": 0, "have_videos": 0}
         self._prescan_total_bytes = 0
         self._prescan_loading_dots = 0
         self._prescan_folders_scanned = 0
@@ -815,7 +815,7 @@ class App(tk.Tk):
             vids = f"{summary.get('videos',0)} (" + T(self.lang, "prescan_have_fmt", n=summary.get('videos_existing',0)) + ")"
             
             # Calculate total size for this folder
-            folder_bytes = summary.get('images_bytes', 0) + summary.get('videos_bytes', 0) + summary.get('data_bytes', 0)
+            folder_bytes = summary.get('images_bytes', 0) + summary.get('videos_bytes', 0)
             try:
                 import drive_fetch_resilient as dfr
                 size_text = dfr.human_bytes(int(folder_bytes))
@@ -835,15 +835,12 @@ class App(tk.Tk):
             # Update running totals
             self._prescan_totals["images"] += summary.get('images', 0)
             self._prescan_totals["videos"] += summary.get('videos', 0)
-            self._prescan_totals["data"] += summary.get('data', 0)
             self._prescan_totals["have_images"] += summary.get('images_existing', 0)
             self._prescan_totals["have_videos"] += summary.get('videos_existing', 0)
-            self._prescan_totals["have_data"] += summary.get('data_existing', 0)
             
             # Accumulate bytes from this folder
             self._prescan_total_bytes += summary.get('images_bytes', 0)
             self._prescan_total_bytes += summary.get('videos_bytes', 0)
-            self._prescan_total_bytes += summary.get('data_bytes', 0)
             
             # Increment scanned folder count
             self._prescan_folders_scanned += 1
@@ -869,8 +866,7 @@ class App(tk.Tk):
         totals_text = (
             f"{T(self.lang, 'prescan_totals')}: "
             f"{T(self.lang,'images')}={totals.get('images',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_images',0)) + ") | "
-            f"{T(self.lang,'videos')}={totals.get('videos',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_videos',0)) + ") | "
-            f"{T(self.lang,'data')}={totals.get('data',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_data',0)) + ")\n"
+            f"{T(self.lang,'videos')}={totals.get('videos',0)} (" + T(self.lang,'prescan_have_fmt', n=totals.get('have_videos',0)) + ")\n"
             f"{T(self.lang, 'prescan_bytes_total')}: {bytes_text}"
         )
         self._prescan_totals_label.configure(text=totals_text)

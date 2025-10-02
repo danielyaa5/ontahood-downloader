@@ -111,8 +111,31 @@ class TkLogHandler:
         if not message.endswith('\n'):
             message += '\n'
         
-        # Parse and style the message
-        self._insert_styled_message(message)
+        # Temporarily enable widget for insertion
+        widget_was_disabled = False
+        try:
+            # Detect current state; not all platforms expose 'state' via cget
+            cur_state = None
+            try:
+                cur_state = self.widget.cget("state")
+            except Exception:
+                cur_state = None
+            if cur_state == "disabled":
+                widget_was_disabled = True
+                self.widget.configure(state="normal")
+        except Exception:
+            pass
+        
+        try:
+            # Parse and style the message
+            self._insert_styled_message(message)
+        finally:
+            # Restore disabled state
+            if widget_was_disabled:
+                try:
+                    self.widget.configure(state="disabled")
+                except Exception:
+                    pass
         
         # Auto-scroll if user is at bottom
         if self._follow_tail:

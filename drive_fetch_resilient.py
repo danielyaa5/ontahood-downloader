@@ -2,7 +2,7 @@
 # drive_fetch_resilient.py v1.10 — 2025-10-01
 # Minimal wrapper for the modular dfr backend package
 
-import os, time, signal, logging, platform
+import os, time, signal, logging, platform, threading
 from typing import List, Dict, Optional
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -61,9 +61,6 @@ class Counters:
     videos_done: int = 0
     videos_skipped: int = 0
     videos_failed: int = 0
-    data_done: int = 0
-    data_skipped: int = 0
-    data_failed: int = 0
     bytes_written: int = 0
 
 @dataclass
@@ -80,12 +77,11 @@ START_TS = time.time()
 INTERRUPTED = False
 EXPECTED_IMAGES = 0
 EXPECTED_VIDEOS = 0
-EXPECTED_DATA = 0
 ALREADY_HAVE_IMAGES = 0
 ALREADY_HAVE_VIDEOS = 0
-ALREADY_HAVE_DATA = 0
 EXPECTED_TOTAL_BYTES = 0
 INCOMPLETE_TARGETS = set()
+_LOCK = threading.Lock()  # Thread-safe access to counters
 
 # -------------------- i18n helper --------------------
 
@@ -107,16 +103,14 @@ signal.signal(signal.SIGINT, on_sigint)
 
 def reset_counters():
     """Reset all global counters and state."""
-    global TOTALS, EXPECTED_IMAGES, EXPECTED_VIDEOS, EXPECTED_DATA
-    global ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS, ALREADY_HAVE_DATA  
+    global TOTALS, EXPECTED_IMAGES, EXPECTED_VIDEOS
+    global ALREADY_HAVE_IMAGES, ALREADY_HAVE_VIDEOS  
     global START_TS, INTERRUPTED, LINK_SUMMARIES, FAILED_ITEMS, EXPECTED_TOTAL_BYTES
     TOTALS = Totals()
     EXPECTED_IMAGES = 0
     EXPECTED_VIDEOS = 0
-    EXPECTED_DATA = 0
     ALREADY_HAVE_IMAGES = 0
     ALREADY_HAVE_VIDEOS = 0
-    ALREADY_HAVE_DATA = 0
     EXPECTED_TOTAL_BYTES = 0
     START_TS = time.time()
     INTERRUPTED = False

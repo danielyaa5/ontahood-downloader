@@ -90,13 +90,6 @@ def classify_media(mime: str, name: str, file_ext: Optional[str]) -> Optional[st
         return "image"
     if (mime or "").startswith("video/") or ext in _VIDEO_EXTS:
         return "video"
-    mime_lower = (mime or "").lower()
-    if (
-        mime_lower.startswith("application/") or
-        mime_lower.startswith("text/") or
-        ext in {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "zip", "rar", "7z"}
-    ):
-        return "data"
     return None
 
 

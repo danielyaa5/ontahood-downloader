@@ -96,41 +96,6 @@ def process_file(service, creds, file_obj: Dict, out_dir: str, counters_key: str
             pass
         return False
 
-    elif media_kind == "data":
-        base, ext = os.path.splitext(name)
-        if not ext:
-            if "pdf" in (mime or "").lower():
-                ext = ".pdf"
-            elif "text" in (mime or "").lower():
-                ext = ".txt"
-            elif file_ext:
-                ext = f".{file_ext}"
-            else:
-                ext = ".dat"
-        target = os.path.join(out_subdir, f"{base}__{fid}{ext}")
-        if not dfr.OVERWRITE and os.path.exists(target):
-            logging.info(dfr.L(f"= exists (data): {target}", f"= sudah ada (data): {target}"))
-            with dfr._LOCK:
-                dfr.TOTALS.grand.data_skipped += 1; folder_ctrs.data_skipped += 1
-            return True
-        logging.info(dfr.L(f"Downloading data file -> {target}", f"Mengunduh file data -> {target}"))
-        ok = download_file_resumable(service, creds, fid, target, label=dfr.L("Data", "Data"))
-        if ok:
-            with dfr._LOCK:
-                dfr.TOTALS.grand.data_done += 1; folder_ctrs.data_done += 1
-            return True
-        with dfr._LOCK:
-            dfr.TOTALS.grand.data_failed += 1; folder_ctrs.data_failed += 1
-        try:
-            with dfr._LOCK:
-                dfr.FAILED_ITEMS.append({
-                    "id": fid, "name": name, "kind": "data", "__root_name": counters_key,
-                    "__folder_out": out_subdir, "target": target
-                })
-        except Exception:
-            pass
-        return False
-
     else:
         dfr.logging.debug(dfr.L(f"- skip unclassified: {name} [{mime}]", f"- lewati (tidak terklasifikasi): {name} [{mime}]"))
         return False
@@ -160,26 +125,14 @@ def print_grand_summary():
 
 
 def print_progress():
-    total_images = dfr.EXPECTED_IMAGES; total_videos = dfr.EXPECTED_VIDEOS; total_data = dfr.EXPECTED_DATA
+    total_images = dfr.EXPECTED_IMAGES; total_videos = dfr.EXPECTED_VIDEOS
     done_images = dfr.ALREADY_HAVE_IMAGES + dfr.TOTALS.grand.images_done
     done_videos = dfr.ALREADY_HAVE_VIDEOS + dfr.TOTALS.grand.videos_done
-    done_data = dfr.ALREADY_HAVE_DATA + dfr.TOTALS.grand.data_done
     remaining_images = max(0, total_images - done_images)
     remaining_videos = max(0, total_videos - done_videos)
-    remaining_data = max(0, total_data - done_data)
-    if total_data > 0:
-        logging.info(dfr.L(
-            f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
-            f"videos {done_videos}/{total_videos} (left {remaining_videos}) | "
-            f"data {done_data}/{total_data} (left {remaining_data})",
-            f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
-            f"video {done_videos}/{total_videos} (sisa {remaining_videos}) | "
-            f"data {done_data}/{total_data} (sisa {remaining_data})"
-        ))
-    else:
-        logging.info(dfr.L(
-            f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
-            f"videos {done_videos}/{total_videos} (left {remaining_videos})",
-            f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
-            f"video {done_videos}/{total_videos} (sisa {remaining_videos})"
-        ))
+    logging.info(dfr.L(
+        f"[Progress] images {done_images}/{total_images} (left {remaining_images}) | "
+        f"videos {done_videos}/{total_videos} (left {remaining_videos})",
+        f"[Progress] gambar {done_images}/{total_images} (sisa {remaining_images}) | "
+        f"video {done_videos}/{total_videos} (sisa {remaining_videos})"
+    ))

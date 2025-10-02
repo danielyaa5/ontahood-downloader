@@ -109,21 +109,17 @@ def main():
         from .utils import classify_media
         dfr.EXPECTED_IMAGES = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "image")
         dfr.EXPECTED_VIDEOS = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "video")
-        dfr.EXPECTED_DATA = sum(1 for t in tasks if classify_media(t.get("mimeType",""), t.get("name",""), t.get("fileExtension")) == "data")
         logging.info(dfr.L(f"Using direct task list: {len(tasks)} items", f"Memakai daftar tugas langsung: {len(tasks)} item"))
     else:
         tasks = prescan_tasks(service)
 
     image_tasks: List[Dict] = []
     video_tasks: List[Dict] = []
-    data_tasks: List[Dict] = []
     from .utils import classify_media
     for f in tasks:
         kind = classify_media(f.get("mimeType",""), f.get("name",""), f.get("fileExtension"))
         if kind == "video":
             video_tasks.append(f)
-        elif kind == "data":
-            data_tasks.append(f)
         else:
             image_tasks.append(f)
 
@@ -150,18 +146,6 @@ def main():
                 print_progress()
         except Exception as e:
             logging.error(dfr.L(f"Worker error: {e}", f"Kesalahan pekerja: {e}"))
-
-    # Sequential data
-    for f in data_tasks:
-        if dfr.INTERRUPTED:
-            break
-        wait_if_paused()
-        try:
-            ok = process_file(service, creds, f, f['__folder_out'], f['__root_name'])
-            if ok:
-                print_progress()
-        except Exception as e:
-            logging.error(dfr.L(f"Data worker error: {e}", f"Kesalahan pekerja data: {e}"))
 
     cleanup_incomplete_targets()
     print_progress()

@@ -39,16 +39,16 @@ def prescan_tasks(service) -> List[Dict]:
                 f"# Pra-pindai: {root_name} ({url}) -> induk {url_label}"
             ))
 
-            link_images = link_videos = link_data = 0
-            link_images_existing = link_videos_existing = link_data_existing = 0
-            link_images_bytes = link_videos_bytes = link_data_bytes = 0
+            link_images = link_videos = 0
+            link_images_existing = link_videos_existing = 0
+            link_images_bytes = link_videos_bytes = 0
 
             for f in list_folder_recursive(svc, folder_id, rel_path=""):
                 if dfr.INTERRUPTED:
                     break
                 fid  = f.get("id"); mime = f.get("mimeType",""); fext = f.get("fileExtension")
                 kind = classify_media(mime, f.get("name",""), fext)
-                if kind in ("image", "video", "data"):
+                if kind in ("image", "video"):
                     f["__root_name"] = root_name
                     f["__folder_out"] = folder_out
                     rel = f.get("__rel_path","")
@@ -85,37 +85,6 @@ def prescan_tasks(service) -> List[Dict]:
                                     link_images_bytes += estimate_thumbnail_size_bytes(int(dfr.IMAGE_WIDTH))
                                 except Exception:
                                     link_images_bytes += 100 * 1024
-                    elif kind == "data":
-                        link_data += 1
-                        with dfr._LOCK:
-                            dfr.EXPECTED_DATA += 1
-                        if not ext:
-                            if "pdf" in (mime or "").lower():
-                                ext = ".pdf"
-                            elif "text" in (mime or "").lower():
-                                ext = ".txt"
-                            elif fext:
-                                ext = f".{fext}"
-                            else:
-                                ext = ".dat"
-                        data_target = os.path.join(target_dir, f"{base}__{fid}{ext}")
-                        if os.path.exists(data_target):
-                            with dfr._LOCK:
-                                dfr.ALREADY_HAVE_DATA += 1
-                            link_data_existing += 1
-                        else:
-                            local_tasks.append(f)
-                            try:
-                                sz = int(f.get("size") or 0)
-                                if not sz:
-                                    meta = get_item(svc, fid, "size")
-                                    sz = int(meta.get("size") or 0)
-                                link_data_bytes += sz
-                            except Exception:
-                                logging.debug(dfr.L(
-                                    f"Could not get size for data file {fid}",
-                                    f"Tidak bisa mendapatkan ukuran untuk file data {fid}"
-                                ))
                     else:  # video
                         link_videos += 1
                         with dfr._LOCK:
@@ -144,18 +113,10 @@ def prescan_tasks(service) -> List[Dict]:
             logging.error(dfr.L(f"Listing failed for URL {url}: {e}", f"Listing gagal untuk URL {url}: {e}"))
             return local_tasks
 
-        if link_data > 0:
-            logging.info(dfr.L(
-                f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | "
-                f"videos={link_videos} (have {link_videos_existing}) | data={link_data} (have {link_data_existing})",
-                f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | "
-                f"video={link_videos} (sudah {link_videos_existing}) | data={link_data} (sudah {link_data_existing})"
-            ))
-        else:
-            logging.info(dfr.L(
-                f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | videos={link_videos} (have {link_videos_existing})",
-                f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | video={link_videos} (sudah {link_videos_existing})"
-            ))
+        logging.info(dfr.L(
+            f"[Count] {root_name}: images={link_images} (have {link_images_existing}) | videos={link_videos} (have {link_videos_existing})",
+            f"[Jumlah] {root_name}: gambar={link_images} (sudah {link_images_existing}) | video={link_videos} (sudah {link_videos_existing})"
+        ))
         with dfr._LOCK:
             dfr.LINK_SUMMARIES.append({
                 "root_name": root_name,
@@ -165,12 +126,9 @@ def prescan_tasks(service) -> List[Dict]:
                 "videos": link_videos,
                 "videos_existing": link_videos_existing,
                 "videos_bytes": link_videos_bytes,
-                "data": link_data,
-                "data_existing": link_data_existing,
-                "data_bytes": link_data_bytes,
                 "url": url,
             })
-            dfr.EXPECTED_TOTAL_BYTES += (link_images_bytes + link_videos_bytes + link_data_bytes)
+            dfr.EXPECTED_TOTAL_BYTES += (link_images_bytes + link_videos_bytes)
         print_folder_summary(root_name, link_images, link_images_existing, link_videos, link_videos_existing)
         return local_tasks
 
@@ -188,16 +146,8 @@ def prescan_tasks(service) -> List[Dict]:
             except Exception as e:
                 logging.error(dfr.L(f"Prescan worker error: {e}", f"Kesalahan prescan: {e}"))
 
-    if dfr.EXPECTED_DATA > 0:
-        logging.info(dfr.L(
-            f"[Pre-Scan Summary] images={dfr.EXPECTED_IMAGES} (have {dfr.ALREADY_HAVE_IMAGES}) | "
-            f"videos={dfr.EXPECTED_VIDEOS} (have {dfr.ALREADY_HAVE_VIDEOS}) | data={dfr.EXPECTED_DATA} (have {dfr.ALREADY_HAVE_DATA})",
-            f"[Ringkasan Pra-Pindai] gambar={dfr.EXPECTED_IMAGES} (sudah {dfr.ALREADY_HAVE_IMAGES}) | "
-            f"video={dfr.EXPECTED_VIDEOS} (sudah {dfr.ALREADY_HAVE_VIDEOS}) | data={dfr.EXPECTED_DATA} (sudah {dfr.ALREADY_HAVE_DATA})"
-        ))
-    else:
-        logging.info(dfr.L(
-            f"[Pre-Scan Summary] images={dfr.EXPECTED_IMAGES} (have {dfr.ALREADY_HAVE_IMAGES}) | videos={dfr.EXPECTED_VIDEOS} (have {dfr.ALREADY_HAVE_VIDEOS})",
-            f"[Ringkasan Pra-Pindai] gambar={dfr.EXPECTED_IMAGES} (sudah {dfr.ALREADY_HAVE_IMAGES}) | video={dfr.EXPECTED_VIDEOS} (sudah {dfr.ALREADY_HAVE_VIDEOS})"
-        ))
+    logging.info(dfr.L(
+        f"[Pre-Scan Summary] images={dfr.EXPECTED_IMAGES} (have {dfr.ALREADY_HAVE_IMAGES}) | videos={dfr.EXPECTED_VIDEOS} (have {dfr.ALREADY_HAVE_VIDEOS})",
+        f"[Ringkasan Pra-Pindai] gambar={dfr.EXPECTED_IMAGES} (sudah {dfr.ALREADY_HAVE_IMAGES}) | video={dfr.EXPECTED_VIDEOS} (sudah {dfr.ALREADY_HAVE_VIDEOS})"
+    ))
     return tasks_all
